@@ -992,7 +992,7 @@ rt_sanity = rt.sanity_checks(
 )
 rt_sanity.to_csv({name + "_sanity.csv"!r}, index=False)
 with pd.option_context("display.max_colwidth", None):
-    display(rt_sanity.style.hide(axis="index").set_properties(subset=["detail"], **{{"text-align": "left"}}))
+    display(rt_sanity)
 print("Sanity tests:", rt_sanity["status"].value_counts().to_dict())
 for row in rt_sanity[rt_sanity["status"] != "PASS"].itertuples():
     print(f"{{row.status}}: {{row.check}}. {{row.detail}}")
