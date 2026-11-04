@@ -1,0 +1,26 @@
+# Data and results live outside this repo.
+*.xlsx
+*.xls
+*.csv
+*.tsv
+*.mat
+*.fcs
+*.tif
+*.tiff
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.pptx
+figures/
+
+# Experiment notebooks live with their data.
+*.ipynb
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+.idea/
+.venv/
