@@ -7,7 +7,15 @@ blobs between their colonies; ``tracker="seed"`` is MATLAB's seed-pixel tracker
 (``scanlag.track.seed_tracker``), where merged colonies all report the blob. Outputs per plate,
 under ``<results>/<scanner>/plate_<k>/``: plate.json, mask.png, labels.zarr (detected objects),
 colonies.zarr (colony IDs, footprint tracker only), tracks.parquet, colonies.parquet (see
-``write_plate``). ``retrack_plate`` tracks an already segmented plate again from its labels.zarr.
+``write_plate``), and final_objects.parquet. ``retrack_plate`` tracks an already segmented plate
+again from its labels.zarr.
+
+Final count of the whole plate: colonies are tracked in the working area (``mask_fraction``, 0.8 of
+the plate radius, as MATLAB), but they grow out to about 0.92 of it, beyond which the dish wall
+and its reflections begin. The last frame is segmented once more out to ``full_fraction`` (default
+0.92), and its objects are written to final_objects.parquet (``final_objects``). Objects outside
+the working area count only if they are colony-shaped (round, compact), since rim reflections are
+the detector's main false positives there. plate.json's "final_count" has the totals.
 
 Detectors:
 * ``classical``: MATLAB's threshold (im2L.m), with contrast limits from the plate's last frame
@@ -36,7 +44,8 @@ from scanlag.detect.classical import DEFAULT_THRESHOLD, binarize, label_column_m
 from scanlag.io.matlab_import import ColonyStatus
 from scanlag.io.raw import read_scan
 from scanlag.pipeline.flags import colony_flags
-from scanlag.pipeline.plates import Aligner, Plate, circle_mask, crop, find_plates, is_empty_slot
+from scanlag.pipeline.plates import Aligner, Plate, circle_mask, crop
+from scanlag.pipeline.plates import find_dishes as plates_find_dishes
 from scanlag.pipeline.scans import Scanner
 from scanlag.store import PROJECT_ROOT, ResultsStore
 from scanlag.track.seed_tracker import MIN_AREA, SeedTracker, border_status
@@ -58,6 +67,50 @@ class RunConfig:
     min_area: int = MIN_AREA  # px; smaller unmatched blobs don't start a colony
     tracker: str = "footprint"  # or "seed" (MATLAB: merged colonies report the merged blob)
     workers: int = 6  # plates processed in parallel threads per frame (1 = one after another)
+    full_fraction: float = 0.92  # radius of the final whole-plate count / plate radius
+
+
+FULL_FRACTION = RunConfig.full_fraction
+RIM_SOLIDITY = 0.85  # objects outside the working area must be at least this compact ...
+RIM_ECCENTRICITY = 0.9  # ... and at most this elongated to count as colonies
+
+
+def final_objects(labels: np.ndarray, plate: Plate, cfg: RunConfig) -> tuple[pd.DataFrame, dict]:
+    """(one row per object of the last frame's whole-plate segmentation, the totals).
+
+    Per object: centre (crop pixels), area, distance from the plate centre as a fraction of the
+    radius (``r_frac``), ``region`` (inner: in the working area, rim: between it and
+    ``full_fraction``), solidity, eccentricity and ``counted``. Inner objects of at least
+    ``min_area`` px are counted; rim objects also have to be colony-shaped.
+
+    Totals: ``n_inner``, ``n_rim`` and ``n_full`` = inner + rim counted objects, and ``n_full_est``,
+    which also counts the colonies hidden in merged clusters: each object counts as its area over a
+    typical single colony's (the median area of compact inner objects), rounded, at least 1.
+    """
+    from skimage.measure import regionprops
+
+    x0, y0, _ = plate.crop
+    rows = []
+    for r in regionprops(labels):
+        cy, cx = r.centroid
+        r_frac = float(np.hypot(cx - (plate.cx - x0), cy - (plate.cy - y0)) / plate.r)
+        inner = r_frac <= cfg.mask_fraction
+        shaped = r.solidity >= RIM_SOLIDITY and r.eccentricity <= RIM_ECCENTRICITY
+        rows.append({"object_id": r.label, "x": cx, "y": cy, "area_px": int(r.area), "r_frac": r_frac,
+                     "region": "inner" if inner else "rim", "solidity": float(r.solidity),
+                     "eccentricity": float(r.eccentricity),
+                     "counted": bool(r.area >= cfg.min_area and (inner or shaped))})
+    table = pd.DataFrame(rows, columns=["object_id", "x", "y", "area_px", "r_frac", "region", "solidity",
+                                        "eccentricity", "counted"])
+    counted = table[table.counted]
+    single = counted[(counted.region == "inner") & (counted.solidity >= 0.9)].area_px
+    single_px = float(single.median()) if len(single) else float(counted.area_px.median()) if len(counted) else 0.0
+    est = np.maximum(1, np.round(counted.area_px / single_px)).sum() if single_px else 0
+    totals = {"full_fraction": cfg.full_fraction, "mask_fraction": cfg.mask_fraction,
+              "n_inner": int((counted.region == "inner").sum()), "n_rim": int((counted.region == "rim").sum()),
+              "n_full": int(len(counted)), "n_full_est": int(est), "single_colony_px": single_px,
+              "n_rim_rejected": int((~table.counted & (table.region == "rim")).sum())}
+    return table, totals
 
 
 class ClassicalSegmenter:
@@ -217,9 +270,7 @@ def opencv_threads(n: int):
 
 def find_dishes(background_scan: np.ndarray, cfg: RunConfig) -> tuple[list[Plate], list[int]]:
     """(plates holding a dish, numbers of the empty slots)."""
-    plates = find_plates(background_scan, cfg.n_plates)
-    empty = [p.number for p in plates if is_empty_slot(background_scan, p)]
-    return [p for p in plates if p.number not in empty], empty
+    return plates_find_dishes(background_scan, cfg.n_plates)
 
 
 def plate_crop(image: np.ndarray, k: int, plate: Plate, aligner: Aligner) -> tuple[np.ndarray, tuple[int, int]]:
@@ -227,28 +278,6 @@ def plate_crop(image: np.ndarray, k: int, plate: Plate, aligner: Aligner) -> tup
     dx, dy = (0, 0) if k == 0 else aligner.shift(image)
     x0, y0, s = plate.crop
     return crop(image, x0 + dx, y0 + dy, s), (dx, dy)
-
-
-def last_frame_counts(scanner: Scanner, cfg: RunConfig, seg=None, log=print) -> dict[int, int]:
-    """Objects of at least ``cfg.min_area`` px on each plate's last frame: a quick first estimate of
-    how dense the plates are, before the whole time-lapse is processed."""
-    seg = seg or make_segmenter(cfg, log)
-    n = len(scanner.scans)
-    background_scan = read_scan(scanner.scans[0])
-    last = read_scan(scanner.scans[-1])
-    k_prev = max(n - 1 - PREVIOUS_GAP, 0)
-    previous = read_scan(scanner.scans[k_prev])
-    counts = {}
-    for p in find_dishes(background_scan, cfg)[0]:
-        aligner = Aligner(background_scan, p, mask_fraction=cfg.mask_fraction)
-        mask = circle_mask(p.crop[2], p, cfg.mask_fraction)
-        background = crop(background_scan, *p.crop)
-        image = plate_crop(last, n - 1, p, aligner)[0]
-        if isinstance(seg, ClassicalSegmenter):
-            seg.set_last_frame(p.number, image, background, mask)
-        labels = seg.segment(p.number, image, background, plate_crop(previous, k_prev, p, aligner)[0], mask)
-        counts[p.number] = int((np.bincount(labels.ravel())[1:] >= cfg.min_area).sum())
-    return counts
 
 
 def process_scanner(scanner: Scanner, store: ResultsStore, cfg: RunConfig, log=print, seg=None,
@@ -276,6 +305,8 @@ def process_scanner(scanner: Scanner, store: ResultsStore, cfg: RunConfig, log=p
     aligners = {p.number: Aligner(background_scan, p, mask_fraction=cfg.mask_fraction) for p in plates}
     size = {p.number: p.crop[2] for p in plates}
     masks = {p.number: circle_mask(size[p.number], p, cfg.mask_fraction) for p in plates}
+    full_masks = {p.number: circle_mask(size[p.number], p, max(cfg.full_fraction, cfg.mask_fraction)) for p in plates}
+    finals = {}
     backgrounds = {p.number: crop(background_scan, *p.crop) for p in plates}
     seg = seg or make_segmenter(cfg, log)
     log(f"{scanner.name}: {n} scans, plates at " + ", ".join(f"{p.number}:({p.cx:.0f},{p.cy:.0f})" for p in plates))
@@ -310,6 +341,9 @@ def process_scanner(scanner: Scanner, store: ResultsStore, cfg: RunConfig, log=p
         own = trackers[p.number].update(labels, int(labels.max()))
         if p.number in colonies_out:
             writes.append(writer.submit(colonies_out[p.number].__setitem__, k, own.astype(np.uint16)))
+        if k == n - 1:  # the final count of the whole plate
+            full = seg.segment(p.number, im, backgrounds[p.number], hist[0], full_masks[p.number])
+            finals[p.number] = final_objects(full, p, cfg)
 
     def run_worker(my_plates):
         try:
@@ -338,12 +372,13 @@ def process_scanner(scanner: Scanner, store: ResultsStore, cfg: RunConfig, log=p
     with ThreadPoolExecutor(max(1, len(groups))) as pool:  # each plate's tables and flags on its own
         return list(pool.map(lambda p: write_plate(store, out[p.number], scanner, p, cfg, seg, masks[p.number],
                                                    shifts[p.number], trackers[p.number], labels_out[p.number],
-                                                   colonies_out.get(p.number)), plates))
+                                                   colonies_out.get(p.number), finals.get(p.number)), plates))
 
 
 def write_plate(store, out, scanner: Scanner, plate: Plate, cfg: RunConfig, seg, mask, shifts,
-                tracker, labels, own=None) -> Path:
-    """Write one plate's plate.json, mask.png, tracks.parquet and colonies.parquet; returns its folder."""
+                tracker, labels, own=None, final=None) -> Path:
+    """Write one plate's plate.json, mask.png, tracks.parquet, colonies.parquet and (``final``: the
+    output of ``final_objects``) final_objects.parquet; returns its folder."""
     detector = seg.name
     times = np.asarray(scanner.times_min)
     tracks, colonies = track_tables(tracker, times, mask, labels, own)
@@ -357,7 +392,10 @@ def write_plate(store, out, scanner: Scanner, plate: Plate, cfg: RunConfig, seg,
         "detector": detector, "threshold": cfg.threshold if detector == "classical" else None,
         "contrast_limits": getattr(seg, "limits", {}).get(plate.number),
         "min_area": cfg.min_area, "tracker": cfg.tracker,
+        "final_count": None if final is None else final[1] | {"n_tracked": int((colonies.final_area_px > 0).sum())},
     }, *out, "plate.json")
+    if final is not None:
+        store.write_table(final[0], *out, "final_objects.parquet")
     store.write_mask(mask, *out, "mask.png")
     store.write_table(tracks, *out, "tracks.parquet")
     store.write_table(colonies, *out, "colonies.parquet")

@@ -176,3 +176,10 @@ def circle_mask(size: int, plate: Plate, fraction: float = 0.8) -> np.ndarray:
     x0, y0, _ = plate.crop
     yy, xx = np.mgrid[:size, :size]
     return np.hypot(xx - (plate.cx - x0), yy - (plate.cy - y0)) <= fraction * plate.r
+
+
+def find_dishes(background_scan: np.ndarray, n_plates: int = 6) -> tuple[list[Plate], list[int]]:
+    """(plates holding a dish, numbers of the empty slots)."""
+    plates = find_plates(background_scan, n_plates)
+    empty = [p.number for p in plates if is_empty_slot(background_scan, p)]
+    return [p for p in plates if p.number not in empty], empty

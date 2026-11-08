@@ -100,11 +100,31 @@ def test_find_scanners_groups_and_names(tmp_path):
     (tmp_path / "T2" / "run_vapc_scan20250806_1726.log").write_text("2025/08/06 17:26:30 - Starting.\n")
     scanners = {s.name: s for s in find_scanners(tmp_path)}
     assert set(scanners) == {"1-3", "1-1.2"}
-    assert len(scanners["1-3"].scans) == 2 and scanners["1-3"].times_min == [0.0, 120.0]
-    assert scanners["1-3"].time_zero == "first scan"  # the log starts after the first scan
+    assert len(scanners["1-3"].scans) == 2
+    # the log starts within the first scan's minute: file names are to the minute, so it counts
+    assert scanners["1-3"].time_zero == "run_vapc_scan20250806_1726.log" and scanners["1-3"].times_min == [-0.5, 119.5]
+    (tmp_path / "T2" / "run_vapc_scan20250806_1726.log").write_text("2025/08/06 17:28:00 - Starting.\n")
+    assert {s.name: s for s in find_scanners(tmp_path)}["1-3"].time_zero == "first scan"  # starts after it
     (tmp_path / "T2" / "run_vapc_scan20250806_1726.log").write_text("2025/08/06 17:16:00 - Starting.\n")
     scanners = {s.name: s for s in find_scanners(tmp_path)}
     assert scanners["1-3"].time_zero == "run_vapc_scan20250806_1726.log" and scanners["1-3"].times_min == [10.0, 130.0]
+
+
+def test_time_zero_skips_aborted_runs_and_finds_parent_logs(tmp_path):
+    from scanlag.pipeline.scans import find_scanners
+
+    # as 2026_10_15_MGR_glucose: two aborted starts, the real run, and one scanner in a subfolder
+    for name, start in (("run_20261015_1130.log", "11:30:12"), ("run_20261015_1300.log", "13:00:33"),
+                        ("run_20261015_1305.log", "13:05:55")):
+        (tmp_path / name).write_text(f"2026/10/15 {start} - Starting.\n")
+    (tmp_path / "scanner1").mkdir()
+    for name in ("_1-4.3u_20261015_1306.tiff", "_1-4.3u_20261015_1507.tiff", "scanner1/_1-4.1u_20261015_1307.tiff",
+                 "scanner1/_1-4.1u_20261015_1507.tiff"):
+        (tmp_path / name).write_bytes(b"")
+    scanners = {s.name: s for s in find_scanners(tmp_path)}
+    for name in ("1-4.3u", "1-4.1u"):
+        assert scanners[name].time_zero == "run_20261015_1305.log"
+        assert scanners[name].start.strftime("%H:%M:%S") == "13:05:55"
 
 
 def test_select_scanners(tmp_path):

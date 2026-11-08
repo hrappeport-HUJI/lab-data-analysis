@@ -5,8 +5,9 @@
 1. Finds every scanner's time-lapse in <scan folder> (also in subfolders; MATLAB ROI folders are
    skipped). Scans must be named <prefix>_<scanner>_<YYYYMMDD>_<HHMM>.tif[f]. The first scan of each
    scanner is the background. --prefix / --scanner keep only some of the scanners.
-2. Segments the last frame of every plate to estimate its density, and offers to exclude plates
-   with more than --max-colonies blobs.
+2. Estimates every plate's density from its last scan, without the detector (as
+   check_density.py), and offers to exclude plates with more than --max-colonies colonies in the
+   working area (TNTC). --exclude leaves plates out without asking.
 3. Finds the plates (default 6 per scanner, numbered as in MATLAB: left column top to bottom,
    then the right column), aligns every frame, segments it and tracks the colonies.
 4. Opens the review GUI (PlateAnalyzer-style) to include/exclude colonies, with suspicious tracks
@@ -14,7 +15,9 @@
 5. "Finish & export" in the GUI (or --no-review / --export-only) writes the tables of every plate in
    the results folder (only the selected scanners' plates with --prefix / --scanner):
    <scanner>/plate_<k>/ colonies.csv, tracks.csv, area_matrix.csv, and
-   all_colonies.csv, all_tracks.csv, summary.csv at the top. Results go to <project root>/results/<folder name>.
+   all_colonies.csv, all_tracks.csv, summary.csv at the top. Each plate's last frame is also
+   segmented out to --full-fraction of the plate radius, for the final colony count of the whole
+   plate (final_objects.csv per plate; n_final_* columns in summary.csv). Results go to <project root>/results/<folder name>.
 
 The raw folder is only read. Re-running skips the segmentation of scanners that are already
 done (use --redo to repeat it), so --review-only or a plain re-run reopens the GUI with the
@@ -31,7 +34,8 @@ import sys
 from pathlib import Path
 
 from scanlag.pipeline.export import export
-from scanlag.pipeline.run import (RunConfig, last_frame_counts, load_plate_dirs, make_segmenter, model_dir,
+from scanlag.pipeline.density import DensityConfig, density_check
+from scanlag.pipeline.run import (FULL_FRACTION, RunConfig, load_plate_dirs, make_segmenter, model_dir,
                                   process_scanner, refresh_flags, retrack_plate)
 from scanlag.pipeline.scans import find_scanners, select_scanners
 from scanlag.cli import split_prompt_args
@@ -66,7 +70,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--scanner", action="append", default=[],
                         help="only this scanner, by scanner folder or file name, e.g. 1-4.1u (repeatable)")
     parser.add_argument("--max-colonies", type=int, default=500,
-                        help="offer to exclude plates with more blobs than this on the last frame (0 = no check)")
+                        help="offer to exclude plates whose estimated colonies in the working area exceed this "
+                             "(TNTC; 0 = no check)")
+    parser.add_argument("--exclude", action="append", default=[], metavar="SCANNER:PLATES",
+                        help="leave these plates out, e.g. 1-4.1u:1-6 or 1-4.2u:2,5 (repeatable)")
+    parser.add_argument("--full-fraction", type=float, default=FULL_FRACTION,
+                        help="radius of the final whole-plate count, as a fraction of the plate radius "
+                             "(beyond about 0.93 the dish wall's reflections start)")
     parser.add_argument("--plates", type=int, default=6, help="plates per scanner")
     parser.add_argument("--mask-fraction", type=float, default=0.8,
                         help="radius of the working area as a fraction of the plate radius (MATLAB: 0.8)")
@@ -87,9 +97,26 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                       help="track existing results again with --tracker, from the stored segmentation. Colony "
                            "numbers change, so the review starts afresh (old tables kept as *.bak)")
     args = parser.parse_args(argv)
+    try:
+        args.exclude = parse_exclude(args.exclude)
+    except ValueError as e:
+        parser.error(str(e))
     if args.review_only and args.no_review:
         parser.error("--review-only with --no-review does nothing but export: use --export-only")
     return args
+
+
+def parse_exclude(specs: list[str]) -> dict[str, list[int]]:
+    """["1-4.1u:1-6", "1-4.2u:2,5"] -> {"1-4.1u": [1, ..., 6], "1-4.2u": [2, 5]}."""
+    from scanlag.analysis.conditions import parse_plates
+
+    out: dict[str, list[int]] = {}
+    for spec in specs:
+        scanner, _, plates = spec.rpartition(":")
+        if not scanner or not plates:
+            raise ValueError(f"--exclude {spec!r}: expected SCANNER:PLATES, e.g. 1-4.1u:1-6")
+        out.setdefault(scanner.strip(), []).extend(parse_plates(plates))
+    return out
 
 
 def to_segment(scanners, store: ResultsStore, redo: bool) -> tuple[list, list, list]:
@@ -120,22 +147,28 @@ def confirm_redo(replace, store: ResultsStore) -> bool:
     return ask(f"warning: --redo will delete the results of {names}{note}. proceed?")
 
 
-def dense_plates(scanners, cfg: RunConfig, seg, limit: int) -> dict[str, list[int]]:
-    """Plates per scanner whose last frame has more than ``limit`` blobs."""
+def dense_plates(scanners, cfg: RunConfig, limit: int, store: ResultsStore) -> dict[str, list[int]]:
+    """Plates per scanner whose estimated colonies in the working area exceed ``limit`` (no detector:
+    scanlag.pipeline.density). The table and overview pictures go to <results>/density/."""
+    table, pictures = density_check(scanners, DensityConfig(n_plates=cfg.n_plates, mask_fraction=cfg.mask_fraction,
+                                                            tntc=limit))
+    store.write_table(table.drop(columns=["cx", "cy", "r"]).round(4), "density", "density.csv")
+    for name, picture in pictures.items():
+        store.write_image(picture, "density", f"{name}.png")
     dense = {}
-    for s in scanners:
-        counts = last_frame_counts(s, cfg, seg, log=lambda m: print(m, flush=True))
-        print(f"{s.name}: last-frame blobs " + ", ".join(f"plate {k}: {c}" for k, c in counts.items()), flush=True)
-        if over := [k for k, c in counts.items() if c > limit]:
-            dense[s.name] = over
+    for name, rows in table.groupby("scanner", sort=False):
+        print(f"{name}: estimated colonies " + ", ".join(f"plate {r.plate}: {r.est_colonies:.0f} ({r.verdict})"
+                                                         for r in rows.itertuples()), flush=True)
+        if over := [int(r.plate) for r in rows.itertuples() if r.est_colonies > limit]:
+            dense[name] = over
     return dense
 
 
-def ask_exclude(dense: dict[str, list[int]], limit: int) -> bool:
+def ask_exclude(dense: dict[str, list[int]], limit: int, store: ResultsStore) -> bool:
     n = sum(map(len, dense.values()))
     listed = " and ".join(f"{name}, plates {', '.join(map(str, plates))}" for name, plates in dense.items())
-    print("(counts are blobs on the last frame: merged colonies count once, so a plate has at least that many)")
-    return ask(f"warning: {listed} {'is' if n == 1 else 'are'} too dense (n>{limit}). "
+    print(f"(estimates from the last scan; pictures in {store.path('density')})")
+    return ask(f"warning: {listed} {'looks' if n == 1 else 'look'} TNTC (estimated n>{limit}). "
                f"expect long runtimes and low quality tracks. exclude these plates?")
 
 
@@ -145,12 +178,15 @@ def segment(todo, replace, incomplete, store: ResultsStore, cfg: RunConfig, args
     if not args.overwrite and not confirm_redo(replace, store):
         sys.exit("stopped")
     seg = make_segmenter(cfg, log=log)
-    exclude = {}
+    exclude = {name: list(plates) for name, plates in args.exclude.items()}
     if args.max_colonies > 0:
-        print("estimating plate density from the last frames...", flush=True)
-        dense = dense_plates(todo, cfg, seg, args.max_colonies)
-        if dense and ask_exclude(dense, args.max_colonies):
-            exclude = dense
+        print("estimating plate density from the last scans...", flush=True)
+        dense = dense_plates(todo, cfg, args.max_colonies, store)
+        dense = {name: [p for p in plates if p not in exclude.get(name, [])] for name, plates in dense.items()}
+        dense = {name: plates for name, plates in dense.items() if plates}
+        if dense and ask_exclude(dense, args.max_colonies, store):
+            for name, plates in dense.items():
+                exclude.setdefault(name, []).extend(plates)
     for s in todo:
         if s in incomplete:
             print(f"{s.name}: removing the results of an interrupted run")
@@ -179,7 +215,8 @@ def main() -> None:
     store = ResultsStore(args.out or default_results_dir(raw), [raw])
     print(f"results: {store.root}")
     cfg = RunConfig(detector=args.detector, n_plates=args.plates, mask_fraction=args.mask_fraction,
-                    threshold=args.threshold, tracker=args.tracker, workers=args.workers)
+                    threshold=args.threshold, tracker=args.tracker, workers=args.workers,
+                    full_fraction=args.full_fraction)
 
     filtered = bool(args.prefix or args.scanner)
     scanners = []

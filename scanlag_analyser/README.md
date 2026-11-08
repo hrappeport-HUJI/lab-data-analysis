@@ -269,13 +269,20 @@ scanner (`1-4.1u`). If the same scanner name occurs in two folders, the folder n
 
 ### Time zero
 
-Times are reported in minutes since time zero, which is the earlier of
+Times are reported in minutes since time zero: the start of the robot run that took the scans, from the
+`YYYY/MM/DD HH:MM:SS - Starting.` line of its `run_*.log`, or the first scan if no log fits.
 
-* the `YYYY/MM/DD HH:MM:SS - Starting.` line of a `run_*.log` file **in the same folder as the scans**, and
-* the first scan.
+A folder often holds logs of aborted starts too, and a scanner's scans may sit in a subfolder without a log
+(in `2026_10_15_MGR_glucose`, `run_..._1130.log` and `run_..._1300.log` were aborted, the real run is
+`run_..._1305.log`, and `scanner1/` has no log). So the log used is the **latest** one whose start is before the
+scanner's first scan (or within the same minute, since file names give the time to the minute), looked for
+in the scanner's own folder first and then in its parent folders up to the scan folder given to the script.
+All scanners of one run then share its time zero.
 
 The pipeline prints which one it used for each scanner (`time zero from first scan` or
-`time zero from run_<...>.log`). Only the scan folder itself is searched for the log, not its parent folders.
+`time zero from run_<...>.log`); `inspect_scans.py` shows it before anything is processed. Plates
+processed before this rule (2026-11-08) took the first log alphabetically in the scanner's own folder;
+`--redo` updates them.
 
 ### Image assumptions (hard-coded)
 
@@ -295,7 +302,7 @@ The pipeline prints which one it used for each scanner (`time zero from first sc
 ```
 python scripts/scanlag_pipeline.py <scan folder> [--detector unet|cellpose|classical|<model dir>]
                                    [--out DIR] [--prefix P ...] [--scanner NAME ...] [--max-colonies N]
-                                   [--plates N] [--mask-fraction F] [--threshold TH] [--tracker footprint|seed]
+                                   [--exclude SCANNER:PLATES ...] [--full-fraction F] [--plates N] [--mask-fraction F] [--threshold TH] [--tracker footprint|seed]
                                    [--workers N] [--no-review] [--overwrite]
                                    [--redo | --review-only | --export-only | --reflag | --retrack]
 ```
@@ -311,7 +318,9 @@ python scripts/scanlag_pipeline.py <scan folder> [--detector unet|cellpose|class
 | `--out` | folder | `<project folder>/results/<scan folder name>` | Results folder. Must not be inside the raw-data folder (and vice versa). |
 | `--prefix` | text, repeatable | all | Only the scanners whose file name prefix starts with this (case-insensitive), e.g. `--prefix epec-amp`. |
 | `--scanner` | text, repeatable | all | Only this scanner, e.g. `--scanner 1-4.1u` (case-insensitive). It matches either the results sub-folder name (`CTRL1_1-4.1u`) or the scanner name from the file names (`1-4.1u`, which selects all folders with that scanner). With `--prefix`, a scanner must match both. |
-| `--max-colonies` | integer | `500` | Before segmenting, the last frame of every plate is segmented once and its blobs of at least 10 px are counted (`<scanner>: last-frame blobs plate 1: 74, ...`). Colonies that have merged by then count once, so the true number of colonies is at least that. If plates have more blobs than this, the script asks `warning: <scanner>, plates ... are too dense (n>500). expect long runtimes and low quality tracks. exclude these plates? y/n`. Answering `n`, or no terminal, keeps them. Excluded plates get no results folder and are recorded in `scanner.json` as `excluded_plates`. `0` turns the check off. The check only covers scanners segmented in this run (not those already done, and not with `--review-only`, `--export-only`, `--reflag` or `--retrack`). |
+| `--max-colonies` | integer | `500` | Before segmenting, every plate's density is estimated from its last scan without the detector (`scanlag/pipeline/density.py`, the same check as `check_density.py`, see below): `<scanner>: estimated colonies plate 1: 74 (ok), ...`. If plates are estimated above this (TNTC), the script asks `warning: <scanner>, plates ... look TNTC (estimated n>500). expect long runtimes and low quality tracks. exclude these plates? y/n`. Answering `n`, or no terminal, keeps them. The table and a picture of each scanner's last scan go to `<results>/density/`. Excluded plates get no results folder and are recorded in `scanner.json` as `excluded_plates`. `0` turns the check off. The check only covers scanners segmented in this run (not those already done, and not with `--review-only`, `--export-only`, `--reflag` or `--retrack`). |
+| `--exclude` | `SCANNER:PLATES`, repeatable | none | Leave these plates out without asking, e.g. `--exclude 1-4.1u:1-6 --exclude 1-4.2u:2,5`. For unattended runs after `check_density.py`; plates listed here are not asked about again. |
+| `--full-fraction` | number | `0.92` | Radius of the final whole-plate count, as a fraction of the plate radius (see "Whole-plate count" below). Beyond about 0.93 the dish wall and its reflections begin. |
 | `--plates` | integer | `6` | Number of plates per scanner. |
 | `--mask-fraction` | number | `0.8` | Radius of the working area (where colonies are counted) as a fraction of the plate radius. 0.8 is the MATLAB default. |
 | `--threshold` | number | `0.2` | Threshold `TH` of the **classical** detector only (ignored by models). |
@@ -327,6 +336,44 @@ python scripts/scanlag_pipeline.py <scan folder> [--detector unet|cellpose|class
 
 `--redo`, `--review-only`, `--export-only`, `--reflag` and `--retrack` are mutually exclusive: give at most
 one of them.
+
+### Density check before the run (`check_density.py`)
+
+```
+python scripts/check_density.py <scan folder> [--out DIR] [--prefix P] [--scanner S] [--tntc 500] [--dense 200]
+```
+
+Finds TNTC plates in seconds, without the detector and without counting colonies. Each plate's last scan is
+compared with the background scan: the fraction of the working area that changed (`coverage`) and the median
+size of the changed patches (`median_blob_px`, a typical colony or cluster) give `est_colonies = covered
+area / median patch`. A lawn or a TNTC plate covers much of the plate with small patches, so it scores high,
+while counting blobs would see a few huge merged ones. Verdicts: `TNTC` above `--tntc`, `dense` above
+`--dense` (expect many merged colonies), else `ok`. On the pilot `2026_10_15_MGR_glucose` (last scan, 40 h):
+sparse plates 17–75, dense but countable plates 180–350 (at 21 h), TNTC plates 1,000–1,900.
+
+It writes `<results>/density/density.csv` and `<results>/density/<scanner>.png`: the last scan with each
+plate circled in its verdict's colour (green ok, orange dense, red TNTC), its number and estimate, where the
+plate's own handwritten label can be read. Nothing is excluded: decide, then run the pipeline with
+`--exclude <scanner>:<plates> --max-colonies 0`.
+
+### Whole-plate count
+
+Colonies are tracked in the working area only (`--mask-fraction`, 0.8 of the radius), but they grow out to
+about 0.92 of it. The last frame of each plate is therefore segmented once more, out to `--full-fraction`.
+Its objects go to `final_objects.parquet` (and `final_objects.csv` on export) with their distance from the
+centre (`r_frac`), `region` (`inner` or `rim`), shape and `counted`. In the rim band only colony-shaped
+objects count (solidity ≥ 0.85, eccentricity ≤ 0.9), because wall reflections are the detector's main false
+positives there. `plate.json` → `final_count` holds the totals, and `summary.csv` gets:
+
+| Column | Meaning |
+|---|---|
+| `n_whole_plate` | The best count of the plate: `n_included` (tracked colonies in the working area; tracking separates colonies that merged later) + `n_final_rim` |
+| `n_final_rim` | Colonies at the last frame in the rim band (not tracked: a merged cluster counts once) |
+| `n_final_full` | All colonies at the last frame out to `final_fraction` (clusters count once) |
+| `n_final_full_est` | The same, with each object counted as its area over a typical single colony's (rounded, at least 1) |
+| `n_final_inner` | The working area's share of `n_final_full` |
+
+Plates processed before this existed have empty columns; re-run them with `--redo` to get the counts.
 
 **Scanner filters (`--prefix`, `--scanner`)** apply to every step: the density check, the segmentation,
 `--reflag`, `--retrack`, the review window and the export. "Finish & export", `--no-review` and
@@ -345,8 +392,8 @@ stops, and dense plates are kept. Use `--overwrite` and `--max-colonies 0` (or a
 
 1. **Scans** are found and grouped by scanner (section 3), and filtered by `--prefix` / `--scanner`. The
    script prints each scanner with its number of scans and where its time zero came from. Scanners that
-   already have results (a `scanner.json`) are skipped (unless `--redo`). For the others, the last frame of each
-   plate is segmented to estimate its density, and you may exclude very dense plates (`--max-colonies`).
+   already have results (a `scanner.json`) are skipped (unless `--redo`). For the others, each plate's density
+   is estimated from its last scan, and you may exclude TNTC plates (`--max-colonies`, `--exclude`).
 2. **Plates** are found with a Hough circle transform on the background scan, refined by a least-squares
    fit to the plate rim, and numbered like MATLAB's `CreateBoardHint`: by column from left to right, and
    top to bottom within a column (on a 2 × 3 board, plates 1-3 are the left column).
@@ -709,7 +756,8 @@ Rows = frames; first column `time_min`, then one column `colony_<id>` per **incl
 ### `summary.csv` (top level)
 
 `scanner, plate, reviewed` (plate opened in the window), `n_colonies, n_included, n_valid, n_near_border,
-n_manually_excluded, n_zero_final_area, n_flagged_included`. Note: here `plate` is the folder name
+n_manually_excluded, n_zero_final_area, n_flagged_included`, and the whole-plate counts `n_whole_plate,
+n_final_rim, n_final_inner, n_final_full, n_final_full_est, final_fraction` (section 4, Whole-plate count). Note: here `plate` is the folder name
 (`plate_1`), while elsewhere it is a number.
 
 ### `labels.zarr`
@@ -1295,6 +1343,8 @@ scanlag_analyser/
   docs/PLAN.md                developer design notes and benchmark results (sections 1-15)
   models/                     trained detectors (unet_scanlag_v1 in git; others git-ignored)
   scripts/                    command-line tools
+    inspect_scans.py            what a scan folder holds: scanners, times, gaps, time zero
+    check_density.py            quick TNTC check of every plate, before the pipeline
     scanlag_pipeline.py         raw scans → results → review window → export
     scanlag_analysis.py         conditions → tables + histograms
     compare_with_matlab.py      new results vs a MATLAB analysis
@@ -1315,6 +1365,7 @@ scanlag_analyser/
     io/matlab_import.py         MATLAB *_data.mat reader, ColonyStatus codes
     pipeline/scans.py           find scans, group by scanner, time zero
     pipeline/plates.py          plate detection, alignment, masks
+    pipeline/density.py         detector-free density estimate (TNTC check)
     pipeline/run.py             segmentation + tracking per scanner, per-plate outputs
     pipeline/flags.py           review flags
     pipeline/export.py          CSV export

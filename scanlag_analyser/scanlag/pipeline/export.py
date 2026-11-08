@@ -9,9 +9,20 @@ Per plate (``<results>/<scanner>/plate_<k>/``):
   reviewer, 3 zero final area), appearance time, time from LB to UB px (MATLAB
   getAppearanceGrowth, NaN if the colony merged before reaching UB), final area, flags
 * ``area_matrix.csv``: time x colony area table of the included colonies (MATLAB's ``Area``)
+* ``final_objects.csv``: the objects of the last frame's whole-plate segmentation
+  (``scanlag.pipeline.run.final_objects``), if the plate has one
 
 Experiment level (``<results>/``): ``all_colonies.csv``, ``all_tracks.csv`` (with scanner and plate
 columns) and ``summary.csv`` (colony counts per plate).
+
+Whole-plate counts in the summary (empty for plates processed before they existed):
+
+* ``n_whole_plate``: the best count of the plate's colonies: ``n_included`` (tracked in the working
+  area, which separates colonies that merged later) + ``n_final_rim``
+* ``n_final_rim``: colonies at the last frame between the working area and ``final_fraction`` of the
+  radius (not tracked, so a merged cluster counts once)
+* ``n_final_full``: all colonies at the last frame out to ``final_fraction`` (clusters count once),
+  ``n_final_full_est`` the same with clusters counted by area, ``n_final_inner`` the working area's share
 
 ``export`` always computes the growth time with ``merged_growth="exclude"`` (as MATLAB); see
 ``plate_tables`` for the "split" alternative.
@@ -117,6 +128,9 @@ def export(results: Path, store: ResultsStore, log=print, plate_dirs: list[Path]
         store.write_table(colonies, *rel, "colonies.csv")
         store.write_table(tracks, *rel, "tracks.csv")
         store.write_table(matrix, *rel, "area_matrix.csv")
+        if (plate_dir / "final_objects.parquet").exists():
+            store.write_table(pd.read_parquet(plate_dir / "final_objects.parquet"), *rel, "final_objects.csv")
+        final = json.loads((plate_dir / "plate.json").read_text()).get("final_count") or {}
         review = plate_dir / "review.json"
         reviewed = json.loads(review.read_text()).get("visited", False) if review.exists() else False
         all_col.append(colonies)
@@ -125,7 +139,11 @@ def export(results: Path, store: ResultsStore, log=print, plate_dirs: list[Path]
         summary.append({"scanner": rel[0], "plate": rel[1], "reviewed": reviewed, "n_colonies": len(colonies),
                         "n_included": int(colonies.included.sum()),
                         **{f"n_{s.name.lower()}": int(counts.get(s.name, 0)) for s in ColonyStatus},
-                        "n_flagged_included": int(((colonies.n_flags > 0) & colonies.included).sum())})
+                        "n_flagged_included": int(((colonies.n_flags > 0) & colonies.included).sum()),
+                        "n_whole_plate": int(colonies.included.sum()) + final["n_rim"] if final else None,
+                        "n_final_rim": final.get("n_rim"),
+                        "n_final_inner": final.get("n_inner"), "n_final_full": final.get("n_full"),
+                        "n_final_full_est": final.get("n_full_est"), "final_fraction": final.get("full_fraction")})
     if not summary:
         raise FileNotFoundError(f"no processed plates in {results}")
     store.write_table(pd.concat(all_col, ignore_index=True), "all_colonies.csv")

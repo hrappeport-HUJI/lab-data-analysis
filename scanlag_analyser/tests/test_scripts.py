@@ -95,8 +95,17 @@ def test_to_segment_and_redo_question(pipeline, tmp_path, monkeypatch):
 
 
 def fake_steps(pipeline, monkeypatch, counts):
+    import numpy as np
+
     monkeypatch.setattr(pipeline, "make_segmenter", lambda cfg, log: "segmenter")
-    monkeypatch.setattr(pipeline, "last_frame_counts", lambda s, cfg, seg, log: counts[s.name])
+
+    def fake_density(scanners, cfg):
+        rows = [{"scanner": s.name, "plate": k, "coverage": 0.1, "n_patches": 1, "median_blob_px": 100.0,
+                 "est_colonies": float(n), "verdict": "TNTC" if n > cfg.tntc else "ok", "cx": 0, "cy": 0, "r": 1}
+                for s in scanners for k, n in counts[s.name].items()]
+        return pd.DataFrame(rows), {s.name: np.zeros((4, 4, 3), np.uint8) for s in scanners}
+
+    monkeypatch.setattr(pipeline, "density_check", fake_density)
     processed = {}
 
     def fake_process(s, store, cfg, log, seg, exclude):
@@ -119,9 +128,10 @@ def test_dense_plates_question(pipeline, tmp_path, monkeypatch, capsys, reply, e
     todo = [scanner("A"), scanner("B")]
 
     pipeline.segment(todo, [], [], store, cfg, args)
-    assert prompts == ["warning: A, plates 2, 3 and B, plates 1 are too dense (n>500). expect long runtimes and "
-                       "low quality tracks. exclude these plates? y/n "]
+    assert prompts == ["warning: A, plates 2, 3 and B, plates 1 look TNTC (estimated n>500). expect long runtimes "
+                       "and low quality tracks. exclude these plates? y/n "]
     assert processed == excluded
+    assert (store.root / "density" / "density.csv").exists() and (store.root / "density" / "A.png").exists()
     saved = json.loads(store.path("A", "scanner.json").read_text())
     assert saved["excluded_plates"] == excluded["A"] and saved["model"] is None and "workers" not in saved["config"]
 
@@ -135,6 +145,20 @@ def test_dense_plates_question_is_skipped_below_the_limit(pipeline, tmp_path, mo
     pipeline.segment([scanner("A")], [], [], store, pipeline.RunConfig(detector="classical"),
                      pipeline.parse_args(["raw", "--detector", "classical"]))
     assert prompts == []
+
+
+def test_exclude_option(pipeline, tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    store = ResultsStore(tmp_path / "res", [raw])
+    processed = fake_steps(pipeline, monkeypatch, {"A": {1: 40, 2: 900}, "B": {1: 30, 2: 20}})
+    prompts = answers(monkeypatch)  # A's TNTC plate is already excluded: nothing left to ask
+    args = pipeline.parse_args(["raw", "--detector", "classical", "--exclude", "A:2", "--exclude", "B:1-2"])
+    assert args.exclude == {"A": [2], "B": [1, 2]}
+    pipeline.segment([scanner("A"), scanner("B")], [], [], store, pipeline.RunConfig(detector="classical"), args)
+    assert prompts == [] and processed == {"A": [2], "B": [1, 2]}
+    with pytest.raises(SystemExit):
+        pipeline.parse_args(["raw", "--exclude", "1-4.1u"])
 
 
 def test_unknown_detector(tmp_path):

@@ -6,14 +6,19 @@ Scan robot file names are ``<prefix>_<scanner>_<YYYYMMDD>_<HHMM>.tif[f]``, e.g.
 (``run_<prefix>*.log``) names the same scanners: "scanner ...NQBSCANNER1-3, named '1-3'".
 
 The first scan of each scanner is the background (taken before the plates are incubated).
-Times are minutes since the log's "Starting." line, or since the first scan if there is no log.
+Times are minutes since the robot run started, or since the first scan if no log fits. A folder can
+hold logs of aborted starts too (e.g. run_..._1130.log and run_..._1300.log before the real
+run_..._1305.log), and a scanner's scans may sit in a subfolder without a log. So the run is the
+latest log, in the scanner's folder or a parent folder up to the scan folder, whose "Starting."
+line is before the scanner's first scan. File names give the time to the minute only, so a log
+started within that minute (the scan was taken after it) counts too.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from scanlag.io.raw import parse_timestamp
@@ -39,13 +44,32 @@ class Scanner:
         return [(t - self.start).total_seconds() / 60 for t in self.times]
 
 
-def log_start(directory: Path) -> tuple[datetime, str] | None:
-    """(the "Starting." time of the first robot log in ``directory``, the log's name), or None."""
-    for log in sorted(directory.glob("run_*.log")):
-        with open(log, encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if m := LOG_START.match(line):
-                    return datetime.strptime(m.group(1), "%Y/%m/%d %H:%M:%S"), log.name
+def _log_start_time(log: Path) -> datetime | None:
+    with open(log, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if m := LOG_START.match(line):
+                return datetime.strptime(m.group(1), "%Y/%m/%d %H:%M:%S")
+    return None
+
+
+def log_start(directory: Path, first_scan: datetime | None = None, root: Path | None = None) -> tuple[datetime, str] | None:
+    """(start time, name) of the robot run that took the scans of ``directory``, or None.
+
+    The run is the latest ``run_*.log`` whose "Starting." line is before ``first_scan`` (+ 1 min,
+    as file names are to the minute), looked for in ``directory``, then in its parents up to
+    ``root``. Without ``first_scan``: the first log in ``directory``.
+    """
+    folders = [directory]
+    if root is not None:
+        root = Path(root)
+        folders += [d for d in directory.parents if d == root or root in d.parents]
+    for folder in folders:
+        starts = [(t, log.name) for log in sorted(folder.glob("run_*.log")) if (t := _log_start_time(log))]
+        if first_scan is None:
+            return starts[0] if starts else None
+        before = [s for s in starts if s[0] < first_scan + timedelta(minutes=1)]
+        if before:
+            return max(before)
     return None
 
 
@@ -69,8 +93,8 @@ def find_scanners(root: str | Path) -> list[Scanner]:
         paths = sorted(paths, key=parse_timestamp)
         times = [parse_timestamp(p) for p in paths]
         name = label if labels.count(label) == 1 else f"{directory.name}_{label}"
-        logged = log_start(directory)
-        start, source = logged if logged and logged[0] <= times[0] else (times[0], "first scan")
+        logged = log_start(directory, times[0], root)
+        start, source = logged if logged else (times[0], "first scan")
         scanners.append(Scanner(name, label, directory, paths, times, start, prefixes[directory, label], source))
     return scanners
 
