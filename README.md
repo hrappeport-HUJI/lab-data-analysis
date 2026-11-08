@@ -37,6 +37,23 @@ Tests:
 python -m pytest plate_reader/tests
 ```
 
+## ScanLag
+
+`scanlag_analyser/` analyzes ScanLag colony appearance and growth from plate scans. It is a fork of [alongutf/scanlag_analyser](https://github.com/alongutf/scanlag_analyser), brought in as a git subtree with its history. Its own `README.md` covers setup (`environment.yml`) and the pipeline. It includes the trained U-Net weights (`models/unet_scanlag_v1/model.pt`, ~98 MB).
+
+To pull later upstream changes into the folder:
+
+```
+git remote add scanlag-upstream https://github.com/alongutf/scanlag_analyser  # once
+git subtree pull --prefix=scanlag_analyser scanlag-upstream master
+```
+
+Tests:
+
+```
+cd scanlag_analyser && python -m pytest tests
+```
+
 ## Adding another kind of analysis
 
 Each kind of repeating analysis gets a sibling of `plate_reader/`, such as `flow_cytometry/`, and a skill in `Library/Skills/`. The plate-reader pipeline is the pattern to follow:
