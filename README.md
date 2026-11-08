@@ -48,7 +48,7 @@ git remote add scanlag-upstream https://github.com/alongutf/scanlag_analyser  # 
 git subtree pull --prefix=scanlag_analyser scanlag-upstream master
 ```
 
-To analyze a run, give an agent the `scanlag-experiment` skill (`Library/Skills/scanlag-experiment/` in the Zettelkasten), or follow it yourself: `scripts/inspect_scans.py` checks the scans and time zero, `scripts/check_density.py` finds TNTC plates, `scripts/scanlag_pipeline.py` segments and tracks, and `scripts/scanlag_analysis.py` draws the histograms. On a Mac, use the conda env from `environment-cpu.yml`; it runs the U-Net on the Apple GPU.
+To analyze a run, give an agent the `scanlag-experiment` skill (`Library/Skills/scanlag-experiment/` in the Zettelkasten), or follow it yourself: `scripts/inspect_scans.py` checks the scans and time zero, `scripts/check_density.py` finds TNTC plates, `scripts/scanlag_pipeline.py` segments and tracks, and `scripts/scanlag_analysis.py` draws the histograms. On Hagai's Mac it runs in the `ScriptHub` env (`environment-scripthub.yml` at the repo root, which also covers `plate_reader`), with the U-Net on the Apple GPU.
 
 Tests:
 

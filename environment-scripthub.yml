@@ -1,0 +1,70 @@
+# ScriptHub: the conda env for everything in this repo (plate_reader and scanlag_analyser) and for
+# the experiment notebooks, on Hagai's M1 Mac. PyCharm's "ScriptHub" interpreter points to it.
+#
+#     conda env create -n ScriptHub -f environment-scripthub.yml     (from the repo root)
+#
+# Python 3.12, because scanlag_analyser needs >= 3.11 (and zarr 3). It replaces the Python 3.10
+# ScriptHub of 2025, and keeps the packages that env had for other work.
+#
+# PyTorch comes from pip: PyTorch's macOS wheels for Apple silicon include the Apple-GPU backend
+# (MPS), which the ScanLag U-Net uses. Check with
+#     python -c "from scanlag.device import torch_device; print(torch_device())"     -> mps
+# opencv is the headless build (scanlag needs it; a second, Qt-based opencv clashes with the
+# review window's PyQt5). matplotlib-base, not matplotlib, which would also install PySide6.
+name: ScriptHub
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  # plate_reader (requirements.txt) and notebooks
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib-base
+  - seaborn
+  - plotly
+  - openpyxl
+  - jupyter
+  - jupyterlab
+  - ipywidgets
+  - nbclient
+  - pytest
+  # scanlag_analyser (scanlag_analyser/pyproject.toml, environment.yml)
+  - scikit-image
+  - tifffile
+  - imagecodecs
+  - zarr>=3
+  - pyarrow
+  - pillow
+  - tqdm
+  - fastremap
+  - napari>=0.5
+  - pyqt=5
+  # carried over from the 2025 ScriptHub
+  - networkx
+  - numba
+  - line_profiler
+  - pymc
+  - arviz
+  - xarray
+  - h5py
+  - h5netcdf
+  - biopython
+  - reportlab
+  - rich
+  - pydantic
+  - httpx
+  - pipreqs
+  - pip
+  - pip:
+      - torch>=2.6
+      - torchvision
+      - torchaudio
+      - segmentation-models-pytorch>=0.5
+      - opencv-python-headless
+      - anthropic
+      - openai
+      - kaleido==0.2.1
+      - line_profiler_pycharm
+      - -e ./scanlag_analyser
