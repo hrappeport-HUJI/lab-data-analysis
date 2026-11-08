@@ -131,6 +131,11 @@ conda activate scanlag
 conda env update -n scanlag -f environment-training.yml
 ```
 
+**Slow solve with an old conda.** conda before 23.10 uses the classic solver, which can take very long
+on these environments. Update conda (`conda update -n base conda`) or build with mamba/micromamba, e.g.
+`micromamba create -p <conda folder>/envs/scanlag -f environment-cpu.yml`; `conda activate scanlag` then works
+as usual. A full disk during the build leaves a broken environment folder: check the free space first.
+
 **CUDA version.** With `environment.yml`, conda reads the NVIDIA driver's CUDA version and picks the
 newest PyTorch built for it, so an older driver gets an older PyTorch (any version from 2.6 works). Without
 an NVIDIA driver, `environment.yml` stops with `nothing provides __cuda`: use `environment-cpu.yml`.
@@ -327,6 +332,8 @@ python scripts/scanlag_pipeline.py <scan folder> [--detector unet|cellpose|class
 | `--tracker` | `footprint`, `seed` | `footprint` | `footprint`: each colony keeps its own pixels, and a blob of merged colonies is split between them, so every colony keeps its own area after merging. `seed`: MATLAB's seed-pixel tracker, where merged colonies all report the merged blob's area (section 8, Merges). |
 | `--workers` | integer | `6` | Plates processed in parallel threads (`1` = one after another). The results do not depend on it; lower it if memory is short. |
 | `--no-review` | flag | off | Do not open the window; export the tables straight away (plates not reviewed yet keep their automatic statuses). Cannot be combined with `--review-only` (use `--export-only`). |
+| `--no-qc` | flag | off | Do not write the QC report (`<results>/qc/`, see "QC report" below), which is otherwise written after segmenting, `--reflag` and `--retrack`, before the window opens. |
+| `--qc-galleries` | integer | `3` | Colonies per flag kind and plate shown in the QC report's galleries (`0`: tables and outline pictures only). |
 | `--overwrite` | flag | off | Do not ask before `--redo` deletes existing results (for unattended runs). |
 | `--redo` | flag | off | Segment again even if a scanner was already done. **Deletes that scanner's results folder, including your review decisions.** First asks `warning: --redo will delete the results of A, B, including review decisions on N plate(s). proceed? y/n` (unless `--overwrite`); `n` or no terminal stops. No backup is made. |
 | `--review-only` | flag | off | Skip segmentation; open the review window on the existing results. |
@@ -343,13 +350,17 @@ one of them.
 python scripts/check_density.py <scan folder> [--out DIR] [--prefix P] [--scanner S] [--tntc 500] [--dense 200]
 ```
 
-Finds TNTC plates in seconds, without the detector and without counting colonies. Each plate's last scan is
-compared with the background scan: the fraction of the working area that changed (`coverage`) and the median
-size of the changed patches (`median_blob_px`, a typical colony or cluster) give `est_colonies = covered
-area / median patch`. A lawn or a TNTC plate covers much of the plate with small patches, so it scores high,
-while counting blobs would see a few huge merged ones. Verdicts: `TNTC` above `--tntc`, `dense` above
-`--dense` (expect many merged colonies), else `ok`. On the pilot `2026_10_15_MGR_glucose` (last scan, 40 h):
-sparse plates 17–75, dense but countable plates 180–350 (at 21 h), TNTC plates 1,000–1,900.
+Finds TNTC plates in seconds, without the detector and without tracking colonies. Each plate's last scan is
+compared with the background scan, and the changed patches (colonies are brighter than agar) are measured:
+the fraction of the working area that changed (`coverage`), the median patch (`median_blob_px`, a colony or
+a cluster) and a single colony's size (`single_colony_px`, the median of the compact patches). Every patch
+counts as its area over `single_colony_px` (rounded, at least 1), so a cluster of touching colonies counts
+as several: `est_colonies`. A lawn or a TNTC plate covers much of the plate with small patches, so it scores
+high, while counting blobs would see a few huge merged ones. Verdicts: `TNTC` above `--tntc`, `dense` above
+`--dense` (expect many merged colonies), else `ok`. On the pilot `2026_10_15_MGR_glucose` (last scan, 52 h),
+against the colonies the pipeline then tracked: sparse plates 20–79 (tracked 20–83), dense but countable
+plates 187–360 (tracked 200–399), TNTC plates 1,300–3,800. (The earlier estimate, covered area over the
+median patch, undercounted dense plates by 15–40 %.)
 
 It writes `<results>/density/density.csv` and `<results>/density/<scanner>.png`: the last scan with each
 plate circled in its verdict's colour (green ok, orange dense, red TNTC), its number and estimate, where the
@@ -408,8 +419,10 @@ stops, and dense plates are kept. Use `--overwrite` and `--max-colonies 0` (or a
    colonies whose pixels of the previous frame it overlaps, and a blob of several colonies is split between
    them (footprint tracker, the default; section 8, Merges). With `--tracker seed`, the blob covering the
    seed belongs to the colony, as in MATLAB.
-6. **Status and flags** are set automatically (section 8).
-7. The **review window** opens with all plates in the results folder (only those of the selected scanners
+6. **Status and flags** are set automatically (section 8), and bad frames are found (section 8, Review
+   flags).
+7. The **QC report** is written to `<results>/qc/` (below), and its notes are printed.
+8. The **review window** opens with all plates in the results folder (only those of the selected scanners
    if `--prefix` / `--scanner` was given).
 
 Re-running the same command skips scanners that are already segmented (it prints
@@ -420,6 +433,33 @@ and redone without a question; the script prints `<scanner>: removing the result
 Plates excluded by the density check are not processed later on a plain re-run, because their scanner
 counts as done. To process them after all, run that scanner again with
 `--redo --scanner <name> --max-colonies 0` (this deletes the scanner's review decisions).
+
+### QC report (`scanlag_qc.py`)
+
+```
+python scripts/scanlag_qc.py <results folder> [--galleries 3]
+```
+
+What to look at before the review, written by the pipeline after segmenting, `--reflag` and `--retrack`
+(unless `--no-qc`), or by this script at any time (`scanlag/pipeline/qc.py`). It reads the results and the
+raw scans (read only) and writes `<results>/qc/`:
+
+* `qc.csv`: one row per plate: `lag_growth_rho`, `lag_growth_p`, `lag_growth_n` (the appearance-vs-growth
+  control, section 6); `n_flags_unresolved`; `est_colonies` (density check) against `n_colonies` (tracked in the working
+  area) as `tracked_vs_est`; `n_included`, `n_whole_plate`, `n_final_full`, `n_final_full_est` and
+  `merge_excess` (`n_final_full_est / n_final_full - 1`, the colonies hidden in merged clusters at the end);
+  `merged_share` (included colonies that ever merge); `n_flagged_included`, `flagged_share` and `flags`
+  (counts per flag kind); `n_possible_doublets`; `bad_frames`; `reviewed`
+* `notes.txt`: one line per thing worth a look: a tracked count more than 50 % off the estimate, more than
+  15 % of included colonies with unresolved flags, merge excess above 10 %, more than 2 % possible doublets,
+  bad frames, a plate where appearance and growth rate correlate (Spearman rho < −0.3, p < 0.01); and, on
+  every run, the appearance-vs-growth control per scanner (`control, <scanner>: ...`). Thresholds at the
+  top of `qc.py`
+* `index.html`: the notes and the table, then per plate its last frame with the tracker's colony outlines
+  (cyan; flagged included colonies orange) and, per flag kind, a gallery of up to `--galleries` flagged
+  colonies: six crops over time (appearance, before and at the first merge, separate again, the end) with
+  the colony outlined in red and its neighbours in cyan, and its area track (red dots: merged frames, grey
+  bands: bad frames)
 
 ### Examples
 
@@ -466,17 +506,34 @@ scans** at the path stored in each `plate.json`, so the raw data must be reachab
 ### Layout
 
 * **Top bar:** plate selector with ◀ ▶, *Find colony no.* box (type a number, press Enter), buttons
-  *Exclude (Ctrl+E)*, *Include (Ctrl+I)*, *Exclude all*, *Reset plate*, *◀ flagged*, *flagged ▶ (F)*,
+  *Exclude (Ctrl+E)*, *Include (Ctrl+I)*, *Resolve flags (Ctrl+O)*, *Reset plate*, *◀ flagged*, *flagged ▶ (F)*,
   check boxes, and *Finish & export*.
 * **Left:** the plate image (last frame by default), with a time slider under it.
   Below that: the image layer (*Raw* or *Difference (frame − background)*, which is what MATLAB
   thresholds), *Black* / *White* level sliders and *Auto contrast*.
 * **Middle:** area of each colony over time (log scale by default); a dashed line marks the current frame.
   Each panel has a matplotlib toolbar for zoom and pan (while zoom/pan is active, clicks do not select).
-* **Right:** list of **flagged colonies** (check these first), with a box above it to show one kind of flag only and *Exclude selected* / *Exclude all listed* buttons below it, and details of the selected colony
-  (status, detected status, appearance time, final area, first merge, flags).
+* **Right:** list of **flagged colonies** (check these first), each with a check box (ticked = flags
+  resolved), a box above it to show one kind of flag only, *Hide resolved*, a count of the unresolved
+  flagged colonies, *Exclude selected* / *Exclude all listed* buttons below it, and details of the selected
+  colony (status, detected status, appearance time, final area, first merge, flags and whether they are
+  resolved).
 
-Click a colony on the plate, or its curve in the graph, to select it (cyan ring, thick curve).
+Click a colony on the plate, its curve in the graph or its line in the flagged list to select it: a cyan
+ring around it and a wide yellow ring (to find it on a crowded plate), and a thick curve.
+
+### Resolving flags
+
+A flag asks you to look at a colony; often it is fine (a correct split in a cluster, a doublet that is one
+colony). Resolve its flags with the **check box** in front of it in the flagged list, or **Ctrl+O** (Cmd+O on
+a Mac) for the colonies selected in the list (or the selected colony). Unticking, or Ctrl+O on resolved
+colonies, undoes it. A resolved colony loses its orange "!" on the plate, is listed after the open ones in
+green, is skipped by F / Shift+F, and is hidden by *Hide resolved*. Excluding a colony needs no resolving.
+
+The resolved flag kinds are saved in `colonies.parquet`'s `flags_resolved` and logged in `review.json`. A
+colony stays resolved while all its current flag kinds are resolved, so a new kind raised later by
+`--reflag` shows it again. `summary.csv` and the QC report count `n_flags_unresolved`, and
+`export_review_tiles.py` makes training tiles only from unresolved segmentation flags (section 12).
 
 ### Keyboard shortcuts
 
@@ -484,10 +541,11 @@ Click a colony on the plate, or its curve in the graph, to select it (cyan ring,
 |---|---|
 | Ctrl+E | Exclude the selected colony |
 | Ctrl+I | Include the selected colony (also works for a colony excluded automatically, e.g. near the border) |
+| Ctrl+O (Cmd+O on a Mac) | Resolve / unresolve the flags of the colonies selected in the flagged list, or of the selected colony |
 | Left / Right | Previous / next frame |
 | Home / End | First / last frame |
 | Page Up / Page Down | Previous / next plate |
-| F / Shift+F | Next / previous flagged colony |
+| F / Shift+F | Next / previous included colony with unresolved flags |
 | Enter (in *Find colony no.*) | Select that colony |
 
 ### Check boxes
@@ -497,7 +555,7 @@ Click a colony on the plate, or its curve in the graph, to select it (cyan ring,
 | Outlines | on | Draw colony outlines on the image |
 | Numbers | on | Draw colony numbers (hidden while dragging the slider) |
 | Labels only | off | Show only the segmented blobs (MATLAB's analysis view) |
-| Show excluded | off | Also plot curves of non-included colonies (dotted) |
+| Show excluded | on | Also plot curves of non-included colonies (dotted) |
 | Flagged only | off | Plot only the colonies in the flagged list (follows the flag-kind box) |
 | Log scale | on | Log y axis for the area graph |
 
@@ -507,7 +565,7 @@ Click a colony on the plate, or its curve in the graph, to select it (cyan ring,
 |---|---|
 | white | included |
 | red | included, appears in this frame |
-| orange with "!" | included and flagged |
+| orange with "!" | included, with unresolved flags |
 | magenta | near the border (excluded automatically) |
 | yellow, bold | excluded by you |
 | gray | zero area in the last frame (excluded automatically) |
@@ -519,8 +577,6 @@ own colour; with "Labels only", the line where their blob was split is white. On
 
 ### Bulk actions
 
-* **Exclude all** sets every *included* colony on the current plate to excluded (asks first). Colonies
-  already excluded automatically keep their status.
 * **Flagged list:** choose a flag kind in the box above the list (e.g. *large at appearance*) to list only those
   colonies. *Exclude selected* excludes the colonies selected in the list (Ctrl+click / Shift+click to select
   several); *Exclude all listed* excludes every included colony the list shows. Both ask first and are logged
@@ -533,10 +589,11 @@ own colour; with "Labels only", the line where their blob was split is white. On
 Every change is saved **immediately**; you can close the window at any time and reopen it later.
 
 * `<results>/<scanner>/plate_<k>/colonies.parquet`: columns `status` and `status_name` are updated
-  (`auto_status` keeps the original automatic status).
+  (`auto_status` keeps the original automatic status), and `flags_resolved` holds the resolved flag kinds.
 * `<results>/<scanner>/plate_<k>/review.json`: `{"visited": true/false, "log": [...]}`, an append-only log.
   Single changes are logged as `{"time", "colony_id", "from", "to"}`, bulk actions as
-  `{"time", "action": "exclude all" | "reset", "colony_ids": [...]}`. `visited` becomes true when the
+  `{"time", "action": "exclude flagged: <kind>" | "reset" | "resolve flags" | "unresolve flags", "colony_ids": [...]}`
+  (plates reviewed before November 2026 may also hold `"exclude all"`, a button that no longer exists). `visited` becomes true when the
   plate is opened.
 
 **Finish & export** (warns if some plates shown in the window were never opened) writes the CSV tables for
@@ -617,6 +674,17 @@ Open it in Excel or a text editor, fill in the `condition` column, save as CSV a
 | Radial growth in µm/h | `radial_growth_um_per_h` | The same slope converted to the growth of the radius of a disc of equal area: slope / √π × 84.67 µm/px (300 dpi). |
 | Doubling time | `doubling_time_min`, `doubling_time_h` | Time from the first frame with area ≥ LB to the first frame with area ≥ UB (default 20 → 80 px: the radius doubles; MATLAB `getAppearanceGrowth`). Only frames where the colony is not merged count. Empty (NaN) if the colony merged before reaching UB, never reached UB, or crossed both thresholds between two scans. |
 
+**Control: appearance time vs growth rate.** Appearance is the first detection (a blob of about 10 px), not
+the start of growth: on the pilot, colonies were first seen at about 12 px, 1.5–2 h after the start
+back-extrapolated from their own growth, and that delay is shorter for fast growers. So a fast grower is
+detected earlier even with the same lag, and appearance times partly reflect growth rate. Every run reports
+the Spearman rank correlation of appearance time with radial growth rate: per condition here (printed and in
+`summary.csv`), per plate and per scanner in the QC report. A clearly negative rho means that a difference in
+appearance times between conditions may be a difference in growth rate. Pilot: rho −0.29 (p 1e-36, n 1764) on
+the dense scanner, −0.13 (p 0.02, n 305) on the sparse one. Spearman, not Pearson: a few odd tracks dominate
+Pearson's r on small plates (−0.70 against +0.07 on one pilot plate). See `TODO.md` for the planned
+back-extrapolated lag.
+
 **Merges:** a colony is merged in a frame when it shares a detected blob with another colony. By default
 (`--merged-growth exclude`) merged frames are excluded from both growth metrics, and the old MATLAB rule
 (drop colonies that merge before reaching UB) is kept for the doubling time. With `--merged-growth split`,
@@ -631,7 +699,7 @@ growth values. `first_merged_min` gives the time of the first merge.
 | `<condition>/area_tracks.csv` | Area per colony and frame, long format: `condition, scanner, plate, colony_id, frame, time_min, time_h, area_px, x, y, merged`. |
 | `<condition>/area_matrix.csv` | One row per colony (`condition, scanner, plate, colony_id`), one column per frame (`frame_0`, `frame_1`, ...), area in px, 0 when absent. Frame numbers are only comparable within a scanner (each scanner has its own scan times; use `area_tracks.csv` for times). |
 | `all_colonies.csv` | All conditions together. |
-| `summary.csv` | Per condition: `n_scanners`, `n_plates`, `n_colonies`, and for `appearance_min`, `radial_growth_sqrtpx_per_h`, `radial_growth_um_per_h`, `doubling_time_min` the `_n`, `_mean`, `_median`, `_std`. |
+| `summary.csv` | Per condition: `n_scanners`, `n_plates`, `n_colonies`, and for `appearance_min`, `radial_growth_sqrtpx_per_h`, `radial_growth_um_per_h`, `doubling_time_min` the `_n`, `_mean`, `_median`, `_std`; and the control `appearance_vs_growth_rho`, `_p`, `_n` (below). |
 | `settings.json` | `fit`: the fit settings (`fit_first`, `fit_last`, `min_points`, `lb`, `ub`, `merged_growth`); `layout`: the layout used. |
 | `histograms.html` | Interactive histograms (opens in the browser; self-contained, works offline). |
 
@@ -687,9 +755,13 @@ EPEC260224/                      e.g. <project folder>\results\EPEC260224
   all_colonies.csv               export: every plate's colonies.csv, stacked
   all_tracks.csv                 export: every plate's tracks.csv, stacked
   summary.csv                    export: colony counts per plate
+  density/                       density check: density.csv, <scanner>.png (section 4)
+  qc/                            QC report: index.html, qc.csv, notes.txt, pictures (section 4)
   <scanner>/
     scanner.json                 detector, model (resolved model folder, null for classical), number of scans,
-                                 plates, excluded_plates (density check), config (settings used, without workers)
+                                 plates, excluded_plates (density check), device (cpu, mps, cuda; null for
+                                 classical), minutes (segmentation and tracking), finished (date and time),
+                                 config (settings used, without workers)
     plate_<k>/                   k = plate number (empty slots have no folder)
       plate.json                 geometry, scans, times, alignment, settings
       mask.png                   working area (1-bit PNG)
@@ -714,7 +786,8 @@ files are written by the export for use in Excel, R, etc. Parquet files open in 
 frame order), `times_min` (time of each frame), `start_time` (time zero), `circle` (`number, cx, cy, r,
 crop_x0, crop_y0, crop_size` in background-scan pixels), `crop_xy_size` (`[x0, y0, size]`), `shift_xy`
 (per-frame `[dx, dy]` alignment), `mask_fraction`, `detector` (e.g. `unet_scanlag_v1` or `classical`),
-`threshold` and `contrast_limits` (classical only), `min_area`.
+`threshold` and `contrast_limits` (classical only), `min_area`, `tracker`, `final_count` (section 4,
+Whole-plate count), `bad_frames` (section 8, Review flags).
 
 ### `tracks.parquet` / `tracks.csv`
 
@@ -728,6 +801,7 @@ crop_x0, crop_y0, crop_size` in background-scan pixels), `crop_xy_size` (`[x0, y
 | `x`, `y` | Centroid of the colony's own pixels (seed tracker: of its blob) (0-based pixel coordinates in the plate crop, section 8) |
 | `blob` | (parquet only) label in that frame of `labels.zarr` of the blob holding (most of) the colony |
 | `merged` | The colony shares its blob with another colony |
+| `bad_frame` | The frame is a bad frame of the plate (section 8, Review flags); `False` for plates processed before bad frames were detected, until `--reflag` |
 | `included` | (CSV only) the colony's status is 0 |
 
 Only frames in which the colony is detected (area > 0) have a row.
@@ -746,7 +820,8 @@ Only frames in which the colony is detected (area > 0) have a row.
 | `first_merged_frame` (parquet) / `first_merged_min` (CSV) | First merge, −1 / empty if never |
 | `final_area_px` | Area in the last frame |
 | `seed_x`, `seed_y` | The colony's seed pixel (0-based, plate-crop coordinates) |
-| `flags`, `n_flags` | Review flags (text separated by `; `) and their number |
+| `flags`, `n_flags` | Review flags (text separated by `; `) and their number. In pandas, read the column as `df["flags"]`: `df.flags` is a DataFrame attribute |
+| `flags_resolved` | The flag kinds the reviewer resolved (section 5, Resolving flags), `; `-separated |
 
 ### `area_matrix.csv` (per plate)
 
@@ -757,7 +832,10 @@ Rows = frames; first column `time_min`, then one column `colony_<id>` per **incl
 
 `scanner, plate, reviewed` (plate opened in the window), `n_colonies, n_included, n_valid, n_near_border,
 n_manually_excluded, n_zero_final_area, n_flagged_included`, and the whole-plate counts `n_whole_plate,
-n_final_rim, n_final_inner, n_final_full, n_final_full_est, final_fraction` (section 4, Whole-plate count). Note: here `plate` is the folder name
+n_final_rim, n_final_inner, n_final_full, n_final_full_est, final_fraction` (section 4, Whole-plate count),
+`n_flags_unresolved` (included flagged colonies whose flags were not resolved in the review),
+`n_possible_doublets` (included colonies flagged as possible doublets: the plate likely holds that many more
+colonies than `n_whole_plate`) and `bad_frames` (space-separated frame numbers). Note: here `plate` is the folder name
 (`plate_1`), while elsewhere it is a number.
 
 ### `labels.zarr`
@@ -827,13 +905,24 @@ status by themselves.
 | Flag | Rule |
 |---|---|
 | `gap (n frames)` | Disappears for some frames after appearing (not counting merged frames) |
-| `transient merge (n frames)` | Merged with another colony and separate again later |
+| `transient merge (n frames)` | Seed tracker only: merged with another colony and separate again later, so the area jumps to the blob's and back. With the footprint tracker a merged colony keeps its own area and touching neighbours are harmless (on the pilot's dense plates this flag was 90 % of all flags); a merge that does damage shows as `shrinks`, `jump`, `flicker` or `irregular split` |
 | `shrinks to x%` | Area drops below 75 % of its largest area so far (only once that area is ≥ 20 px). With the footprint tracker merged frames count too, so a bad split or a colony the detector partly lost shows up here |
 | `jump xN` | Area grows more than 2× between consecutive frames (from ≥ 15 px) |
 | `stays small (n px)` | Still below 20 px at the end (dust, speck, bubble) |
 | `large at appearance (n px)` | Already above 20 px in its first frame. New colonies start at 10-15 px; a bigger one is usually a piece split off a neighbouring colony for one frame, which then "merges" back and follows the neighbour's blob (common on dense plates). Note the neighbour is then marked merged from that frame, which shortens its growth fit |
 | `irregular shape (solidity s)` | Solidity < 0.85 (in its last unmerged frame, if ≥ 30 px; the colony's own pixels from `colonies.zarr` with the footprint tracker) |
 | `elongated (eccentricity e)` | Eccentricity > 0.85 (scratches, writing, rim reflections) |
+| `flicker (n changes)` | The area changes by more than 40 % between consecutive frames at least 5 times (from 100 px): the colony keeps gaining and losing a neighbour's pixels, typically next to a colony outside the working area. Its area track is unusable |
+| `irregular split (solidity s)` | Footprint tracker: merged in the last frame, and its own share of the blob has solidity < 0.8. A share bounded by the straight lines where neighbouring fronts met stays convex; an L-shaped or ragged one means the split went wrong |
+| `possible doublet (xr)` | 4 h after its appearance (and not merged until then) it is at least 1.6× the median area of the colonies that appeared within 1 h of it, at the same age: two colonies already touching when first detected, tracked as one (section 8, Merges, limitation). The plate then holds one colony more than counted, and the growth track is the pair's. `summary.csv`'s `n_possible_doublets` counts the included ones |
+
+**Bad frames.** A scan in which at least 5 % of the established colonies (≥ 50 px in the frames before and
+after) are more than 15 % off the mean of their neighbouring frames (a blurred or badly lit scan,
+condensation) is a bad frame. The worst one is found first and replaced by its neighbours' mean, then the
+search repeats, so its neighbours are not marked too. Bad frames are listed in `plate.json` (`bad_frames`) and
+`summary.csv`, marked in `tracks.csv` (`bad_frame`), ignored by the `gap`, `shrinks`, `jump` and `flicker`
+flags, and skipped by the growth metrics (the 20 → 80 px time and `scanlag_analysis.py`). On the pilot,
+frame 162 of `1-4.2u` plate 3 was one (8 % less colony area for one scan).
 
 Run the pipeline with `--reflag` to recompute flags (e.g. after the rules change) without losing
 decisions.
@@ -1073,6 +1162,37 @@ build_testset.py  →  select_tiles.py  →  annotate_tiles.py  →  train_unet.
                                                                         ↓
                                      evaluate_goldset.py / evaluate_plates.py  →  scanlag_pipeline.py --detector models\<name>
 ```
+
+### Training tiles from a review (`export_review_tiles.py`)
+
+```
+python scripts/export_review_tiles.py <results folder> [--out DIR] [--per-plate 20] [--categories ...] [--include-unreviewed]
+```
+
+After the colony review, writes 256 px tiles where the review found the detector wrong
+(`scanlag/train/review_tiles.py`), for the reviewed plates only (unless `--include-unreviewed`):
+
+| Category | Colonies | Frame |
+|---|---|---|
+| `excluded` | excluded by you (debris, writing, reflections, pieces of other colonies) | its last frame |
+| `doublet` | included, `possible doublet` not resolved | appearance + 4 frames |
+| `split` | included, `irregular split` not resolved | last frame |
+| `fragment` | included, `large at appearance` not resolved | appearance frame |
+| `track` | included, `jump` or `flicker` not resolved | the frame of its largest area change |
+
+A resolved flag means the colony was fine and gives no tile; at most `--per-plate` tiles per plate, spread
+over the categories, and no two overlapping tiles of the same frame. The tiles go to
+`<results>/training_tiles/` in the layout of the MATLAB gold set: `manual/tile_<scanner>_p<plate>_c<colony>_<category>/`
+with `image.png`, `background.png`, `previous.png`, `labels_init.png` (the pipeline's colonies, and every other
+detected object as an ID ≥ 10000) and `tile.json` (source, frame, position, flags, reason), and
+`plates/<scanner>__plate_<k>/mask.png`. Existing tiles are kept. Correct them with
+
+```
+python scripts/annotate_tiles.py --testset <results>/training_tiles
+```
+
+after which `scanlag.testset.gold.load_gold_set(<results>/training_tiles)` reads them like the gold set.
+Adding them to `train_unet.py` is still open (`TODO.md`).
 
 The training scripts need `--name` (the new folder under `models/`, e.g. `--name unet_scanlag_v3`), and refuse
 an existing `models/<name>` unless `--force` is given, so the shipped models are not overwritten by accident.
@@ -1340,10 +1460,13 @@ scanlag_analyser/
   environment-cpu.yml         the same with CPU-only PyTorch (no NVIDIA GPU, macOS)
   environment-training.yml    add-on for training, Cellpose and the tests
   README.md                   this file
+  TODO.md                     open work (appearance time, merges, training)
   docs/PLAN.md                developer design notes and benchmark results (sections 1-15)
   models/                     trained detectors (unet_scanlag_v1 in git; others git-ignored)
   scripts/                    command-line tools
     inspect_scans.py            what a scan folder holds: scanners, times, gaps, time zero
+    scanlag_qc.py               QC report of processed plates (also run by the pipeline)
+    export_review_tiles.py      training tiles from a reviewed run, for annotate_tiles.py
     check_density.py            quick TNTC check of every plate, before the pipeline
     scanlag_pipeline.py         raw scans → results → review window → export
     scanlag_analysis.py         conditions → tables + histograms

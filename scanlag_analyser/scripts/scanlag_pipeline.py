@@ -10,9 +10,12 @@
    working area (TNTC). --exclude leaves plates out without asking.
 3. Finds the plates (default 6 per scanner, numbered as in MATLAB: left column top to bottom,
    then the right column), aligns every frame, segments it and tracks the colonies.
-4. Opens the review GUI (PlateAnalyzer-style) to include/exclude colonies, with suspicious tracks
+4. Writes the QC report <results>/qc/ (as scanlag_qc.py: counts against the density estimate,
+   flags by kind, possible doublets, bad frames, outline pictures and galleries of flagged
+   colonies; notes.txt lists what to look at). Also after --reflag and --retrack; not with --no-qc.
+5. Opens the review GUI (PlateAnalyzer-style) to include/exclude colonies, with suspicious tracks
    and shapes flagged.
-5. "Finish & export" in the GUI (or --no-review / --export-only) writes the tables of every plate in
+6. "Finish & export" in the GUI (or --no-review / --export-only) writes the tables of every plate in
    the results folder (only the selected scanners' plates with --prefix / --scanner):
    <scanner>/plate_<k>/ colonies.csv, tracks.csv, area_matrix.csv, and
    all_colonies.csv, all_tracks.csv, summary.csv at the top. Each plate's last frame is also
@@ -31,9 +34,11 @@ import argparse
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from scanlag.pipeline.export import export
+from scanlag.pipeline.qc import GALLERY_PER_KIND, write_qc
 from scanlag.pipeline.density import DensityConfig, density_check
 from scanlag.pipeline.run import (FULL_FRACTION, RunConfig, load_plate_dirs, make_segmenter, model_dir,
                                   process_scanner, refresh_flags, retrack_plate)
@@ -85,6 +90,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                         help="footprint: merged colonies keep their own area; seed: MATLAB, they report the merged blob")
     parser.add_argument("--workers", type=int, default=6, help="plates processed in parallel (1 = one at a time)")
     parser.add_argument("--no-review", action="store_true", help="export without opening the review window")
+    parser.add_argument("--no-qc", action="store_true",
+                        help="don't write the QC report (<results>/qc/) after segmenting, --reflag or --retrack")
+    parser.add_argument("--qc-galleries", type=int, default=GALLERY_PER_KIND,
+                        help=f"colonies per flag kind and plate in the QC galleries (default {GALLERY_PER_KIND})")
     parser.add_argument("--overwrite", action="store_true", help="don't ask before --redo deletes existing results")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--redo", action="store_true",
@@ -172,11 +181,37 @@ def ask_exclude(dense: dict[str, list[int]], limit: int, store: ResultsStore) ->
                f"expect long runtimes and low quality tracks. exclude these plates?")
 
 
+MIN_FREE_GB = 2.0  # free disk space needed in the results folder to start segmenting
+GB_PER_SCANNER = 0.3  # results of one scanner of 6 plates x 200 scans (pilot 2026_10_15: about 0.1 GB)
+
+
+def check_disk(store: ResultsStore, n_scanners: int) -> None:
+    """Stop before segmenting if the results folder's disk is nearly full (a full disk mid-run leaves
+    broken zarr arrays); warn if it is tight."""
+    free = shutil.disk_usage(store.root).free / 1e9
+    need = max(MIN_FREE_GB, GB_PER_SCANNER * n_scanners)
+    if free < need:
+        sys.exit(f"only {free:.1f} GB free on the disk of {store.root}; segmenting {n_scanners} scanner(s) needs "
+                 f"at least {need:.1f} GB. Free some space and run again")
+    if free < 3 * need:
+        print(f"note: {free:.1f} GB free on the results disk", flush=True)
+
+
+def torch_device_name() -> str | None:
+    try:
+        from scanlag.device import torch_device
+
+        return str(torch_device())
+    except Exception:  # noqa: BLE001 - classical detector without torch
+        return None
+
+
 def segment(todo, replace, incomplete, store: ResultsStore, cfg: RunConfig, args) -> None:
     """Density check, then segmentation and tracking of every scanner in ``todo``."""
     log = lambda m: print(m, flush=True)
     if not args.overwrite and not confirm_redo(replace, store):
         sys.exit("stopped")
+    check_disk(store, len(todo))
     seg = make_segmenter(cfg, log=log)
     exclude = {name: list(plates) for name, plates in args.exclude.items()}
     if args.max_colonies > 0:
@@ -192,13 +227,16 @@ def segment(todo, replace, incomplete, store: ResultsStore, cfg: RunConfig, args
             print(f"{s.name}: removing the results of an interrupted run")
         if (store.root / s.name).exists():
             shutil.rmtree(store.path(s.name))
+        t0 = time.time()
         plate_dirs = process_scanner(s, store, cfg, log=log, seg=seg, exclude=exclude.get(s.name, ()))
         if not plate_dirs:
             continue
         settings = {k: v for k, v in vars(cfg).items() if k != "workers"}  # workers doesn't change the results
         store.write_json({"detector": cfg.detector, "model": model_dir(cfg.detector), "n_scans": len(s.scans),
                           "plates": [d.name for d in plate_dirs], "excluded_plates": exclude.get(s.name, []),
-                          "config": settings}, s.name, "scanner.json")
+                          "device": None if cfg.detector == "classical" else torch_device_name(),
+                          "minutes": round((time.time() - t0) / 60, 1),
+                          "finished": time.strftime("%Y-%m-%d %H:%M"), "config": settings}, s.name, "scanner.json")
 
 
 def main() -> None:
@@ -231,6 +269,7 @@ def main() -> None:
         todo, replace, incomplete = to_segment(scanners, store, args.redo)
         if todo:
             segment(todo, replace, incomplete, store, cfg, args)
+    changed = bool(not existing_only and todo) or args.reflag or args.retrack
 
     all_plates = load_plate_dirs(store.root)
     selected = {s.name for s in scanners}
@@ -248,6 +287,10 @@ def main() -> None:
     if hidden := len(all_plates) - len(plate_dirs):
         print(f"note: only the {len(plate_dirs)} plates of the selected scanners are exported; all_colonies.csv, "
               f"all_tracks.csv and summary.csv will leave out the other {hidden}")
+    if changed and not args.no_qc:
+        write_qc(store.root, plate_dirs, store, args.qc_galleries, log=lambda m: print(m, flush=True))
+        notes = store.path("qc", "notes.txt").read_text().strip()
+        print("qc notes:\n" + notes if notes else "qc notes: none", flush=True)
     if args.no_review or args.export_only:
         export(store.root, store, plate_dirs=plate_dirs)
         return

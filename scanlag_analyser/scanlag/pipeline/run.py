@@ -43,7 +43,7 @@ from scanlag.detect.channels import PREVIOUS_GAP
 from scanlag.detect.classical import DEFAULT_THRESHOLD, binarize, label_column_major, stretch_limits, subtract_background
 from scanlag.io.matlab_import import ColonyStatus
 from scanlag.io.raw import read_scan
-from scanlag.pipeline.flags import colony_flags
+from scanlag.pipeline.flags import bad_frames, colony_flags
 from scanlag.pipeline.plates import Aligner, Plate, circle_mask, crop
 from scanlag.pipeline.plates import find_dishes as plates_find_dishes
 from scanlag.pipeline.scans import Scanner
@@ -393,6 +393,7 @@ def write_plate(store, out, scanner: Scanner, plate: Plate, cfg: RunConfig, seg,
         "contrast_limits": getattr(seg, "limits", {}).get(plate.number),
         "min_area": cfg.min_area, "tracker": cfg.tracker,
         "final_count": None if final is None else final[1] | {"n_tracked": int((colonies.final_area_px > 0).sum())},
+        "bad_frames": sorted(int(k) for k in tracks.loc[tracks.bad_frame, "frame"].unique()),
     }, *out, "plate.json")
     if final is not None:
         store.write_table(final[0], *out, "final_objects.parquet")
@@ -414,11 +415,13 @@ def track_tables(tracker, times: np.ndarray, mask: np.ndarray, labels, own=None)
         counts = np.bincount(b[b > 0], minlength=1)
         merged[k] = (b > 0) & (counts[b] > 1)
 
+    bad = bad_frames(area)
     t_idx, c_idx = np.nonzero(area)
     cx, cy = centroid[t_idx, c_idx, 0] - 1, centroid[t_idx, c_idx, 1] - 1  # tracker centroids: 1-based (x, y), as MATLAB
     tracks = pd.DataFrame({
         "frame": t_idx, "time_min": times[t_idx], "colony_id": c_idx + 1, "area_px": area[t_idx, c_idx],
         "x": cx, "y": cy, "blob": blob[t_idx, c_idx], "merged": merged[t_idx, c_idx],
+        "bad_frame": np.isin(t_idx, bad),
     })
 
     seeds = tracker.tracks.seeds
@@ -440,7 +443,8 @@ def track_tables(tracker, times: np.ndarray, mask: np.ndarray, labels, own=None)
         "seed_x": [c for _, c in seeds],  # seeds are 0-based (row, col)
         "seed_y": [r for r, _ in seeds],
     })
-    colonies = colonies.join(colony_flags(area, merged, blob, labels, own).set_index("colony_id"), on="colony_id")
+    flags = colony_flags(area, merged, blob, labels, own, times_min=times, bad=bad)
+    colonies = colonies.join(flags.set_index("colony_id"), on="colony_id").assign(flags_resolved="")
     return tracks, colonies
 
 
@@ -479,7 +483,8 @@ def retrack_plate(store: ResultsStore, plate_dir: Path, tracker: str = "footprin
         if own_out is not None:
             own_out[k] = own.astype(np.uint16)
     tracks, colonies = track_tables(tr, times, mask, labels, own_out)
-    store.write_json(info | {"tracker": tracker, "min_area": cfg.min_area}, *rel, "plate.json")
+    bad = sorted(int(k) for k in tracks.loc[tracks.bad_frame, "frame"].unique())
+    store.write_json(info | {"tracker": tracker, "min_area": cfg.min_area, "bad_frames": bad}, *rel, "plate.json")
     store.write_table(tracks, *rel, "tracks.parquet")
     store.write_table(colonies, *rel, "colonies.parquet")
     return {"old_tracker": old, "old_colonies": n_old, "colonies": len(colonies),
@@ -487,23 +492,30 @@ def retrack_plate(store: ResultsStore, plate_dir: Path, tracker: str = "footprin
 
 
 def refresh_flags(plate_dir: Path) -> int:
-    """Recompute the review flags of a processed plate (e.g. after the flag rules changed).
+    """Recompute the review flags and bad frames of a processed plate (e.g. after the flag rules
+    changed): colonies.parquet's flags, tracks.parquet's ``bad_frame`` and plate.json's ``bad_frames``.
 
     Statuses and review decisions are kept. Returns the number of flagged colonies.
     """
     import zarr
 
+    plate_dir = Path(plate_dir)
+    info = plate_info(plate_dir)
     colonies = pd.read_parquet(plate_dir / "colonies.parquet")
     tracks = pd.read_parquet(plate_dir / "tracks.parquet")
     labels = zarr.open_array(str(plate_dir / "labels.zarr"), mode="r")
-    own = zarr.open_array(str(plate_dir / "colonies.zarr"), mode="r") if merged_area_is_own(plate_info(plate_dir)) else None
+    own = zarr.open_array(str(plate_dir / "colonies.zarr"), mode="r") if merged_area_is_own(info) else None
     shape = (labels.shape[0], len(colonies))
     area, merged, blob = np.zeros(shape, np.int64), np.zeros(shape, bool), np.zeros(shape, np.int64)
     t, c = tracks.frame.to_numpy(), tracks.colony_id.to_numpy() - 1
     area[t, c], merged[t, c], blob[t, c] = tracks.area_px, tracks.merged, tracks.blob
-    flags = colony_flags(area, merged, blob, labels, own).set_index("colony_id")
+    bad = bad_frames(area)
+    flags = colony_flags(area, merged, blob, labels, own, times_min=np.asarray(info["times_min"], float),
+                         bad=bad).set_index("colony_id")
     colonies = colonies.drop(columns=["flags", "n_flags"]).join(flags, on="colony_id")
     colonies.to_parquet(plate_dir / "colonies.parquet", index=False)
+    tracks.assign(bad_frame=tracks.frame.isin(bad)).to_parquet(plate_dir / "tracks.parquet", index=False)
+    (plate_dir / "plate.json").write_text(json.dumps(info | {"bad_frames": bad}, indent=2))
     return int((colonies.n_flags > 0).sum())
 
 

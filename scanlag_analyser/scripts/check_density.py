@@ -9,7 +9,8 @@ TNTC (more than --tntc), dense (more than --dense: expect many merged colonies) 
 
 Writes to the results folder (default <project root>/results/<scan folder name>):
 
-  density/density.csv          one row per plate: coverage, median patch size, estimate, verdict
+  density/density.csv          one row per plate: coverage, median patch size, single colony size,
+                               estimate, verdict
   density/<scanner>.png        the last scan with each plate circled in its verdict's colour
                                (green ok, orange dense, red TNTC) and its estimate
 
@@ -55,8 +56,8 @@ def main() -> None:
     store.write_table(table.drop(columns=["cx", "cy", "r"]).round(4), "density", "density.csv")
     for name, picture in pictures.items():
         store.write_image(picture, "density", f"{name}.png")
-    print(table[["scanner", "plate", "coverage", "median_blob_px", "est_colonies", "verdict"]]
-          .round({"coverage": 3, "median_blob_px": 0, "est_colonies": 0}).to_string(index=False))
+    print(table[["scanner", "plate", "coverage", "median_blob_px", "single_colony_px", "est_colonies", "verdict"]]
+          .round({"coverage": 3, "median_blob_px": 0, "single_colony_px": 0, "est_colonies": 0}).to_string(index=False))
     if tntc := flagged(table):
         print("TNTC: " + "; ".join(f"{s} plates {','.join(map(str, p))}" for s, p in tntc.items()))
         print("to leave them out: " + " ".join(f"--exclude {s}:{','.join(map(str, p))}" for s, p in tntc.items()))

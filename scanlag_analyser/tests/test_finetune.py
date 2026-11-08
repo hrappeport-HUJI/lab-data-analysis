@@ -1,4 +1,7 @@
+import importlib.util
+
 import numpy as np
+import pytest
 import torch
 
 from scanlag.train.cellpose_finetune import BSIZE, augment, masked_loss, normalize, norm_limits, targets
@@ -16,6 +19,8 @@ def test_augment_upscales_and_keeps_label_ids():
     assert set(np.unique(li)) <= {0, 7}  # nearest-neighbour: no blended IDs
 
 
+@pytest.mark.skipif(importlib.util.find_spec("cellpose") is None,
+                    reason="cellpose not installed (training add-on, environment-training.yml)")
 def test_targets_and_masked_loss():
     labels = np.zeros((64, 64), np.int32)
     labels[10:30, 10:30] = 5

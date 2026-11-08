@@ -81,3 +81,16 @@ def test_final_objects_counts_the_whole_plate():
     assert totals["n_rim_rejected"] == 1
     assert totals["n_full"] == totals["n_inner"] + totals["n_rim"]
     assert totals["n_full_est"] == totals["n_full"] + 1  # the merged pair counts as two
+
+
+def test_touching_colonies_count_by_area():
+    """A cluster of touching colonies counts as several: patches are divided by a single colony's size."""
+    plate = Plate(1, 200, 200, 200)
+    mask = circle_mask(400, plate, 0.8)
+    background, image = plate_images(20, 8)
+    yy, xx = np.mgrid[:400, :400]
+    for cx in (180, 196, 212):  # three touching colonies in a row: one patch
+        image[np.hypot(xx - cx, yy - 200) <= 8] = 120
+    m = plate_density(background, image, mask)
+    assert m["n_patches"] <= 21
+    assert abs(m["est_colonies"] - 23) <= 2

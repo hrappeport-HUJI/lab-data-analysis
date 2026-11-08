@@ -22,6 +22,13 @@ Per colony (included colonies only):
   (unless ``merged_growth`` is "split"), never reached ub, or passed both thresholds between two scans
   (a time <= 0 is blanked)
 
+Control (``summary``): the Spearman rank correlation of appearance time with radial growth rate per
+condition (``appearance_vs_growth_rho``, ``_p``, ``_n``). Appearance is the first detection (about
+10 px), so a fast grower is detected sooner even with the same lag: a clearly negative rho means
+appearance times partly reflect growth rate, and conditions that differ in growth rate then differ
+in appearance time without differing in lag. Spearman, not Pearson: a few odd tracks (a late colony
+squeezed by a neighbour) dominate Pearson's r on small plates.
+
 ``merged_growth`` (FitConfig): "exclude" (default) stops both growth metrics at the colony's first
 merge, as MATLAB. "split" also uses the merged frames, where the footprint tracker gives each
 colony its share of the merged blob (seed-tracked plates fall back to "exclude").
@@ -167,6 +174,7 @@ def collect(results: Path, layout: pd.DataFrame, cfg: FitConfig = FitConfig()) -
         with warnings.catch_warnings():  # use_merged_frames below warns once per plate
             warnings.simplefilter("ignore")
             col, tr, _ = plate_tables(plate_dir, cfg.merged_growth)
+        tr = tr[~tr.bad_frame]  # scans where many colonies' areas are off (scanlag.pipeline.flags.bad_frames)
         use_merged = use_merged_frames(plate_info(plate_dir), cfg.merged_growth)
         col, tr = col[col.included], tr[tr.included]
         tr = tr.drop(columns="included")
@@ -209,8 +217,21 @@ def area_matrix(tracks: pd.DataFrame) -> pd.DataFrame:
     return wide.reset_index()
 
 
+def appearance_growth_correlation(appearance, growth) -> tuple[float, float, int]:
+    """(Spearman rho, p value, n) of appearance time against growth rate, over the colonies that have
+    both; NaN if fewer than 10."""
+    from scipy.stats import spearmanr
+
+    d = pd.DataFrame({"a": np.asarray(appearance, float), "g": np.asarray(growth, float)}).dropna()
+    if len(d) < 10 or d.a.nunique() < 2 or d.g.nunique() < 2:
+        return float("nan"), float("nan"), len(d)
+    rho, p = spearmanr(d.a, d.g)
+    return float(rho), float(p), len(d)
+
+
 def summary(colonies: pd.DataFrame, conditions: list[str]) -> pd.DataFrame:
-    """One row per condition: plate and colony counts, and mean/median/std of each metric."""
+    """One row per condition: plate and colony counts, mean/median/std of each metric, and the
+    appearance-vs-growth-rate control (module docstring)."""
     rows = []
     for c in conditions:
         d = colonies[colonies.condition == c]
@@ -219,6 +240,8 @@ def summary(colonies: pd.DataFrame, conditions: list[str]) -> pd.DataFrame:
         for m in ["appearance_min", "radial_growth_sqrtpx_per_h", "radial_growth_um_per_h", "doubling_time_min"]:
             v = d[m].dropna()
             row |= {f"{m}_n": len(v), f"{m}_mean": v.mean(), f"{m}_median": v.median(), f"{m}_std": v.std()}
+        rho, p, n = appearance_growth_correlation(d.appearance_min, d.radial_growth_sqrtpx_per_h)
+        row |= {"appearance_vs_growth_rho": rho, "appearance_vs_growth_p": p, "appearance_vs_growth_n": n}
         rows.append(row)
     return pd.DataFrame(rows)
 

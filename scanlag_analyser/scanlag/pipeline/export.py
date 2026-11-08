@@ -4,7 +4,8 @@ Per plate (``<results>/<scanner>/plate_<k>/``):
 
 * ``tracks.csv``: one row per colony and frame: frame, time_min, time_h, colony_id, area_px, x, y,
   merged (the colony shares a blob with another colony: with the footprint tracker the area is its
-  share of the blob, with the seed tracker the whole blob's), included
+  share of the blob, with the seed tracker the whole blob's), bad_frame (a scan where many colonies'
+  areas are off, ``scanlag.pipeline.flags.bad_frames``: the growth metrics skip it), included
 * ``colonies.csv``: one row per colony: status (0 included, 1 near border, 2 excluded by the
   reviewer, 3 zero final area), appearance time, time from LB to UB px (MATLAB
   getAppearanceGrowth, NaN if the colony merged before reaching UB), final area, flags
@@ -23,6 +24,11 @@ Whole-plate counts in the summary (empty for plates processed before they existe
   radius (not tracked, so a merged cluster counts once)
 * ``n_final_full``: all colonies at the last frame out to ``final_fraction`` (clusters count once),
   ``n_final_full_est`` the same with clusters counted by area, ``n_final_inner`` the working area's share
+* ``n_flags_unresolved``: included flagged colonies whose flags the reviewer has not resolved
+  (``scanlag.pipeline.flags``, Resolving); ``n_flagged_included`` counts them all
+* ``n_possible_doublets``: included colonies flagged "possible doublet" (two colonies tracked as one,
+  so the plate likely holds this many more colonies than ``n_whole_plate``)
+* ``bad_frames``: the plate's bad frames (space-separated), if any
 
 ``export`` always computes the growth time with ``merged_growth="exclude"`` (as MATLAB); see
 ``plate_tables`` for the "split" alternative.
@@ -38,6 +44,7 @@ import numpy as np
 import pandas as pd
 
 from scanlag.io.matlab_import import ColonyStatus
+from scanlag.pipeline.flags import unresolved_mask
 from scanlag.store import ResultsStore
 
 GROWTH_LB, GROWTH_UB = 20, 80  # px, MATLAB getAppearanceGrowth defaults
@@ -75,13 +82,18 @@ def plate_tables(plate_dir: Path, merged_growth: str = "exclude") -> tuple[pd.Da
     info = json.loads((plate_dir / "plate.json").read_text())
     use_merged = use_merged_frames(info, merged_growth)
     colonies = pd.read_parquet(plate_dir / "colonies.parquet")
+    if "flags_resolved" not in colonies:  # plates processed before flags could be resolved
+        colonies = colonies.assign(flags_resolved="")
     tracks = pd.read_parquet(plate_dir / "tracks.parquet")
     included = colonies.set_index("colony_id").status == ColonyStatus.VALID
+    if "bad_frame" not in tracks:  # plates processed before bad frames were detected
+        tracks = tracks.assign(bad_frame=False)
     tracks = tracks.assign(time_h=tracks.time_min / 60,
                            included=tracks.colony_id.map(included).fillna(False).astype(bool))
 
-    lb = first_time(tracks, GROWTH_LB, own_only=not use_merged)
-    ub = first_time(tracks, GROWTH_UB, own_only=not use_merged)
+    good = tracks[~tracks.bad_frame]
+    lb = first_time(good, GROWTH_LB, own_only=not use_merged)
+    ub = first_time(good, GROWTH_UB, own_only=not use_merged)
     first_merge = tracks[tracks.merged].groupby("colony_id").time_min.min()
     ids = colonies.colony_id
     reached_ub = ub.reindex(ids).notna()
@@ -99,11 +111,12 @@ def plate_tables(plate_dir: Path, merged_growth: str = "exclude") -> tuple[pd.Da
     )
     cols = ["scanner", "plate", "colony_id", "status", "status_name", "auto_status", "included", "appearance_frame",
             "appearance_min", "appearance_h", f"growth_{GROWTH_LB}_{GROWTH_UB}px_min", "first_merged_min",
-            "final_area_px", "seed_x", "seed_y", "n_flags", "flags"]
+            "final_area_px", "seed_x", "seed_y", "n_flags", "flags", "flags_resolved"]
     colonies = colonies[cols]
 
     tracks = tracks.assign(scanner=info["scanner"], plate=info["plate"])[
-        ["scanner", "plate", "frame", "time_min", "time_h", "colony_id", "area_px", "x", "y", "merged", "included"]]
+        ["scanner", "plate", "frame", "time_min", "time_h", "colony_id", "area_px", "x", "y", "merged", "bad_frame",
+         "included"]]
     inc = tracks[tracks.included]
     times = pd.Series(info["times_min"], name="time_min")
     if inc.empty:
@@ -130,7 +143,8 @@ def export(results: Path, store: ResultsStore, log=print, plate_dirs: list[Path]
         store.write_table(matrix, *rel, "area_matrix.csv")
         if (plate_dir / "final_objects.parquet").exists():
             store.write_table(pd.read_parquet(plate_dir / "final_objects.parquet"), *rel, "final_objects.csv")
-        final = json.loads((plate_dir / "plate.json").read_text()).get("final_count") or {}
+        info = json.loads((plate_dir / "plate.json").read_text())
+        final = info.get("final_count") or {}
         review = plate_dir / "review.json"
         reviewed = json.loads(review.read_text()).get("visited", False) if review.exists() else False
         all_col.append(colonies)
@@ -140,10 +154,14 @@ def export(results: Path, store: ResultsStore, log=print, plate_dirs: list[Path]
                         "n_included": int(colonies.included.sum()),
                         **{f"n_{s.name.lower()}": int(counts.get(s.name, 0)) for s in ColonyStatus},
                         "n_flagged_included": int(((colonies.n_flags > 0) & colonies.included).sum()),
+                        "n_flags_unresolved": int((unresolved_mask(colonies) & colonies.included).sum()),
                         "n_whole_plate": int(colonies.included.sum()) + final["n_rim"] if final else None,
                         "n_final_rim": final.get("n_rim"),
                         "n_final_inner": final.get("n_inner"), "n_final_full": final.get("n_full"),
-                        "n_final_full_est": final.get("n_full_est"), "final_fraction": final.get("full_fraction")})
+                        "n_final_full_est": final.get("n_full_est"), "final_fraction": final.get("full_fraction"),
+                        "n_possible_doublets": int((colonies.included
+                                                    & colonies["flags"].fillna("").str.contains("possible doublet")).sum()),
+                        "bad_frames": " ".join(map(str, info.get("bad_frames") or []))})
     if not summary:
         raise FileNotFoundError(f"no processed plates in {results}")
     store.write_table(pd.concat(all_col, ignore_index=True), "all_colonies.csv")

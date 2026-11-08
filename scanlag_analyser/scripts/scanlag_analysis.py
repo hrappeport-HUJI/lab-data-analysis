@@ -172,6 +172,9 @@ def main() -> None:
     out.write_table(data.colonies, "all_colonies.csv")
     stats = summary(data.colonies, data.conditions)
     out.write_table(stats, "summary.csv")
+    for r in stats.itertuples():  # control: is appearance time partly growth rate?
+        print(f"control, {r.condition}: appearance vs radial growth rate, Spearman rho {r.appearance_vs_growth_rho:+.2f} "
+              f"(p {r.appearance_vs_growth_p:.1g}, n {r.appearance_vs_growth_n})")
     out.write_json(settings(cfg, layout), "settings.json")  # with the layout used
 
     frame_step = data.tracks.groupby("scanner").time_min.apply(lambda t: pd.Series(t.unique()).sort_values().diff().median())
