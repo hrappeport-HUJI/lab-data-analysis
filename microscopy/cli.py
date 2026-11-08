@@ -30,6 +30,7 @@ def main(argv=None):
             s.add_argument("--run-id")
         if command == "run":
             s.add_argument("--fields", nargs="+")
+            s.add_argument("--baseline-only", action="store_true")
         if command == "analyze":
             s.add_argument("--reviewed-only", action="store_true")
         if command == "serve":
@@ -64,7 +65,9 @@ def main(argv=None):
         elif args.command == "run":
             from .pipeline import run
 
-            result = run(args.project, fields=args.fields)
+            result = run(
+                args.project, fields=args.fields, baseline_only=args.baseline_only
+            )
             result = {k: result[k] for k in ["run_id", "fields"]}
         elif args.command == "analyze":
             from .analysis import analyze

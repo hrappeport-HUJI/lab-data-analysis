@@ -173,8 +173,8 @@ function roi(shape) {
     };
     const n = frameNodes.find(n => founder.observation_ids.includes(n.id));
     const center = n || {
-        x: founder.initial_x,
-        y: founder.initial_y
+        x: frames[index].frame >= founder.last_identity_frame ? (founder.last_x ?? founder.initial_x) : founder.initial_x,
+        y: frames[index].frame >= founder.last_identity_frame ? (founder.last_y ?? founder.initial_y) : founder.initial_y
     };
     const w = Math.min(160, shape[1]),
         h = Math.min(108, shape[0]);

@@ -1,5 +1,7 @@
 """Algorithm runs are immutable; later corrections are independent review revisions."""
 
+from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 import json
 import subprocess
 from pathlib import Path
@@ -51,9 +53,10 @@ def validate_graph(observations, edges):
     return byid, parents, children
 
 
-def run(project, *, segmenter=None, tracker=None, fields=None):
+def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=False):
     p = project if isinstance(project, Project) else Project(project)
     cfg = json.loads(json.dumps(p.config))
+    cfg["analysis_scope"] = "baseline_only" if baseline_only else "time_series"
     sp, tp = cfg.get("segmentation", {}), cfg.get("tracking", {})
     segmenter = segmenter or get_adapter("segmenter", sp.get("adapter", "threshold"))
     tracker = tracker or get_adapter("tracker", tp.get("adapter", "overlap"))
@@ -69,7 +72,10 @@ def run(project, *, segmenter=None, tracker=None, fields=None):
             raise ValueError(f"Unknown pilot fields: {unknown}")
         selected = [f for f in selected if f in fields]
     try:
-        for fi, field in enumerate(selected):
+
+        def process_field(item):
+            fi, field = item
+            observations, edges, founders, qc = [], [], [], []
             records = sorted(
                 (
                     r
@@ -78,35 +84,76 @@ def run(project, *, segmenter=None, tracker=None, fields=None):
                 ),
                 key=lambda r: r["frame"],
             )
+            if baseline_only:
+                records = records[:1]
             previous, previous_labels, last_frame = [], None, None
             baseline = None
-            for record in records:
+
+            def prepare(record):
                 frame = record["frame"]
+                q = {"field": field, "frame": frame, "channel": structural}
+                if frame in cfg.get("quality", {}).get(
+                    "excluded_structure_frames", {}
+                ).get(field, []):
+                    return (
+                        record,
+                        None,
+                        {**q, "usable": False, "reason": "explicit_image_exclusion"},
+                        None,
+                    )
                 image = read_frame(p, field, frame, structural)
-                q = {
-                    "field": field,
-                    "frame": frame,
-                    "channel": structural,
-                    **quality(image),
-                }
+                q.update(quality(image))
                 minimum = cfg.get("quality", {}).get("min_focus_score")
                 q["usable"] = minimum is None or q["focus_score"] >= minimum
                 q["reason"] = "" if q["usable"] else "focus_below_configured_threshold"
+                labels = (
+                    validate_labels(
+                        segmenter.segment(image, context=record, parameters=sp),
+                        image.shape,
+                    )
+                    if q["usable"]
+                    else None
+                )
+                return record, image, q, labels
+
+            def prepared():
+                workers = int(sp.get("workers", 1))
+                if not 1 <= workers <= 8:
+                    raise ValueError("Segmentation workers must be 1–8")
+                if workers > 1 and type(segmenter).__name__ != "ThresholdSegmenter":
+                    raise ValueError(
+                        "Parallel segmentation currently requires the stateless reference segmenter"
+                    )
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    source = iter(records)
+                    pending = deque()
+                    for _ in range(workers):
+                        rec = next(source, None)
+                        if rec is not None:
+                            pending.append(pool.submit(prepare, rec))
+                    while pending:
+                        result = pending.popleft().result()
+                        rec = next(source, None)
+                        if rec is not None:
+                            pending.append(pool.submit(prepare, rec))
+                        yield result
+
+            for record, image, q, labels in prepared():
+                frame = record["frame"]
                 qc.append(q)
                 if not q["usable"]:
                     previous, previous_labels, last_frame = [], None, frame
                     continue
-                labels = validate_labels(
-                    segmenter.segment(image, context=record, parameters=sp), image.shape
-                )
-                label_file = f"labels/{fi:04}_{frame:09}.npy"
+                label_file = f"labels/{fi:04}_{frame:09}.npz"
                 (directory / "labels").mkdir(exist_ok=True)
-                np.save(directory / label_file, labels, allow_pickle=False)
+                np.savez_compressed(directory / label_file, labels=labels)
                 current = []
-                for label in np.unique(labels):
-                    if label == 0:
+                for label, region in enumerate(ndimage.find_objects(labels), 1):
+                    if region is None:
                         continue
-                    yy, xx = np.where(labels == label)
+                    yy, xx = np.where(labels[region] == label)
+                    yy += region[0].start
+                    xx += region[1].start
                     oid = f"f{fi}-t{frame}-o{label}"
                     node = {
                         "id": oid,
@@ -172,6 +219,26 @@ def run(project, *, segmenter=None, tracker=None, fields=None):
                 observations.extend(current)
                 previous, previous_labels, last_frame = current, labels, frame
             print(f"Processed field {field} ({fi+1}/{len(selected)})", flush=True)
+            return observations, edges, founders, qc
+
+        field_workers = int(cfg.get("field_workers", 1))
+        if not 1 <= field_workers <= 8:
+            raise ValueError("field_workers must be 1–8")
+        if field_workers > 1 and (
+            type(segmenter).__name__ != "ThresholdSegmenter"
+            or type(tracker).__name__ not in {"OverlapTracker", "CentroidTracker"}
+        ):
+            raise ValueError(
+                "Parallel fields currently require stateless reference adapters"
+            )
+        with ThreadPoolExecutor(max_workers=field_workers) as field_pool:
+            for obs, links, roots, checks in field_pool.map(
+                process_field, enumerate(selected)
+            ):
+                observations.extend(obs)
+                edges.extend(links)
+                founders.extend(roots)
+                qc.extend(checks)
         validate_graph(observations, edges)
         try:
             commit = subprocess.check_output(

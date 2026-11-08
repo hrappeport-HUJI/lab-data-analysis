@@ -253,7 +253,7 @@ def analyze(project, run_id=None, reviewed_only=False):
     pd.DataFrame(stats).to_csv(out / "summaries.csv", index=False)
     status_counts = {
         s: sum(f["decision"] == s for f in selected)
-        for s in ["division", "lost", "no_division", "exclude"]
+        for s in ["division", "lost", "no_division", "exclude", "not_assessed"]
     }
     summary = {
         "schema_version": 1,

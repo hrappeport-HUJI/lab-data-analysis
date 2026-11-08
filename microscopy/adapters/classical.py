@@ -2,6 +2,7 @@
 
 import numpy as np
 from scipy import ndimage
+from scipy.spatial import cKDTree
 from . import register_segmenter, register_tracker
 
 
@@ -16,7 +17,9 @@ class ThresholdSegmenter:
             if parameters.get("polarity", "dark") == "dark"
             else image - background
         )
-        threshold = parameters.get("threshold")
+        threshold = parameters.get("threshold_by_field", {}).get(
+            str(context.get("field")), parameters.get("threshold")
+        )
         if threshold is None:
             # Robust local-contrast threshold is a proposal, requiring a pilot review.
             median = np.median(contrast)
@@ -44,15 +47,23 @@ class OverlapTracker:
     require_overlap = True
 
     def link(self, previous, current, *, previous_labels, current_labels, parameters):
+        if not previous or not current:
+            return []
+        spatial = cKDTree([(p["x"], p["y"]) for p in previous])
         candidates = {p["id"]: [] for p in previous}
         ambiguous_parents = set()
         maximum = float(parameters.get("max_displacement_px", 15))
         for child in current:
             options = []
-            mask = current_labels == child["label"]
-            for parent in previous:
+            x0, y0, x1, y1 = child["bbox"]
+            mask = current_labels[y0:y1, x0:x1] == child["label"]
+            prior_pixels = previous_labels[y0:y1, x0:x1][mask]
+            for index in spatial.query_ball_point([child["x"], child["y"]], maximum):
+                parent = previous[index]
                 distance = np.hypot(child["x"] - parent["x"], child["y"] - parent["y"])
-                overlap = int(np.sum(previous_labels[mask] == parent["label"]))
+                if distance > maximum:
+                    continue
+                overlap = int(np.sum(prior_pixels == parent["label"]))
                 if distance <= maximum and (overlap > 0 or not self.require_overlap):
                     options.append((parent, overlap, distance))
             # Competing parent identities are not resolved by a guessed nearest link.

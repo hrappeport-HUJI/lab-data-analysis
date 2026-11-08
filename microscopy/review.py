@@ -1,5 +1,6 @@
 """Replay review operations without altering algorithm runs or raw data."""
 
+from functools import lru_cache
 import copy
 import math
 import numpy as np
@@ -55,16 +56,33 @@ def polygon_mask(polygon, shape):
     return result
 
 
+@lru_cache(maxsize=4)
+def _labels(path, modified_ns, size):
+    loaded = np.load(path, allow_pickle=False)
+    if isinstance(loaded, np.lib.npyio.NpzFile):
+        with loaded:
+            array = loaded["labels"]
+    else:
+        array = loaded
+    array.setflags(write=False)
+    return array
+
+
 def observation_mask(project, run_id, node):
     shape = project.frames[
         (node["field"], node["frame"], project.config["structure_channel"])
     ]["shape"]
     if "polygon" in node:
         return polygon_mask(node["polygon"], shape)
+    return label_image(project, run_id, node) == node["label"]
+
+
+def label_image(project, run_id, node):
     path = project.run_path(run_id) / node["labels_file"]
     if not path.resolve().is_relative_to(project.run_path(run_id)):
         raise ValueError("Mask path outside run")
-    return np.load(path, allow_pickle=False) == node["label"]
+    stat = path.stat()
+    return _labels(str(path), stat.st_mtime_ns, stat.st_size)
 
 
 def materialize(project, run_id, operations):

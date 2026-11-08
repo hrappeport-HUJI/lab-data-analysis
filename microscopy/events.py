@@ -101,6 +101,10 @@ def summarize(project, data):
         lower, upper = (
             division if division else (end, next((f for f in frames if f > end), end))
         )
+        if data["config"].get("analysis_scope") == "baseline_only":
+            decision = "not_assessed"
+            reason = "baseline_only"
+            lower = upper = founder["baseline_frame"]
         override = data["event_overrides"].get(founder["id"])
         if override:
             decision = override["decision"]
@@ -115,8 +119,21 @@ def summarize(project, data):
             return project.frames[(field, frame, structure)]["time_s"]
 
         lo, hi = seconds(lower), seconds(upper)
+        last_nodes = [byid[n] for n in reachable if byid[n]["frame"] == end]
+        last_x = (
+            sum(n["x"] for n in last_nodes) / len(last_nodes)
+            if last_nodes
+            else node["x"]
+        )
+        last_y = (
+            sum(n["y"] for n in last_nodes) / len(last_nodes)
+            if last_nodes
+            else node["y"]
+        )
         row = {
             **founder,
+            "last_x": last_x,
+            "last_y": last_y,
             "initial_x": node["x"],
             "initial_y": node["y"],
             "contains_tracking_gap": has_gap,

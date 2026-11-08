@@ -423,3 +423,56 @@ def test_focus_and_configuration_rejections():
     cfg["analysis"]["comparisons"] = [["A", "B"], ["B", "A"]]
     with pytest.raises(ValueError, match="distinct"):
         validate(cfg)
+
+
+def test_baseline_run_does_not_claim_outcomes(project):
+    result = run(project, baseline_only=True, fields=["1"])
+    assert {n["frame"] for n in result["observations"]} == {0}
+    data = materialize(project, result["run_id"], [])
+    assert {f["decision"] for f in summarize(project, data)} == {"not_assessed"}
+    assert not result["edges"]
+
+
+def test_parallel_processing_and_explicit_exclusion(project):
+    project.config["segmentation"]["workers"] = 2
+    project.config["quality"]["excluded_structure_frames"] = {"1": [2]}
+    result = run(project, fields=["1"])
+    assert not any(n["frame"] == 2 for n in result["observations"])
+    assert (
+        next(q for q in result["quality"] if q["frame"] == 2)["reason"]
+        == "explicit_image_exclusion"
+    )
+    data = materialize(project, result["run_id"], [])
+    assert all(f["decision"] == "lost" for f in summarize(project, data))
+
+
+def test_parallel_fields_preserve_canonical_result(project):
+    before = project.load_run(project.latest_run())
+    project.config["field_workers"] = 2
+    after = run(project)
+    for key in ["observations", "edges", "founders", "quality"]:
+        assert before[key] == after[key]
+
+
+def test_field_override_recovers_cells_when_hot_pixel_inflates_range():
+    from microscopy.adapters.classical import ThresholdSegmenter
+
+    image = np.full((64, 64), 1000, dtype=np.uint16)
+    image[10:18, 10:30] = 500
+    image[45, 45] = 65000
+    parameters = {
+        "min_area_px": 20,
+        "max_area_px": 300,
+        "threshold_by_field": {"special": 100},
+    }
+    segmenter = ThresholdSegmenter()
+    labels = segmenter.segment(
+        image, context={"field": "special"}, parameters=parameters
+    )
+    assert labels[14, 20] > 0
+    assert (
+        segmenter.segment(image, context={"field": "ordinary"}, parameters=parameters)[
+            14, 20
+        ]
+        == 0
+    )
