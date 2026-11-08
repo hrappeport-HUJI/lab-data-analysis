@@ -1,0 +1,42 @@
+# ScanLag for users with an NVIDIA GPU (Windows or Linux): the pipeline (default U-Net detector),
+# the review window and the analysis, with the CUDA build of PyTorch.
+#
+#     conda env create -f environment.yml
+#     conda activate scanlag
+#
+# No NVIDIA GPU, or a Mac: use environment-cpu.yml instead (on such machines this file fails to
+# solve, with "nothing provides __cuda"). For training new models, add environment-training.yml
+# afterwards (see the README). Everything comes from conda-forge, except the scanlag package itself
+# and opencv-python-headless (pip, last lines).
+# Keep the package list in step with environment-cpu.yml (tests/test_environment.py checks it).
+name: scanlag
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - numpy
+  - scipy
+  - scikit-image
+  - tifffile
+  - imagecodecs
+  - zarr>=3
+  - pandas
+  - pyarrow
+  - pillow
+  - matplotlib-base  # not matplotlib, which also installs PySide6 (Qt 6) next to PyQt5
+  - tqdm
+  - plotly
+  # U-Net detector (fastremap: used by the image normalisation the U-Net shares with training).
+  # pytorch-gpu makes conda pick a CUDA build that the installed NVIDIA driver supports.
+  - pytorch>=2.6
+  - pytorch-gpu
+  - torchvision
+  - segmentation-models-pytorch>=0.5
+  - fastremap
+  # review window
+  - napari>=0.5
+  - pyqt=5
+  - pip
+  - pip:
+      - -e .
