@@ -24,8 +24,9 @@ Whole-plate counts in the summary (empty for plates processed before they existe
   radius (not tracked, so a merged cluster counts once)
 * ``n_final_full``: all colonies at the last frame out to ``final_fraction`` (clusters count once),
   ``n_final_full_est`` the same with clusters counted by area, ``n_final_inner`` the working area's share
-* ``n_flags_unresolved``: included flagged colonies whose flags the reviewer has not resolved
-  (``scanlag.pipeline.flags``, Resolving); ``n_flagged_included`` counts them all
+* ``n_flags_unreviewed``: included flagged colonies the reviewer has not reviewed yet (included or
+  excluded in the review window; ``scanlag.pipeline.flags``, Reviewing); ``n_flagged_included`` counts
+  them all
 * ``n_possible_doublets``: included colonies flagged "possible doublet" (two colonies tracked as one,
   so the plate likely holds this many more colonies than ``n_whole_plate``)
 * ``bad_frames``: the plate's bad frames (space-separated), if any
@@ -44,7 +45,7 @@ import numpy as np
 import pandas as pd
 
 from scanlag.io.matlab_import import ColonyStatus
-from scanlag.pipeline.flags import unresolved_mask
+from scanlag.pipeline.flags import reviewed_column, unreviewed_mask
 from scanlag.store import ResultsStore
 
 GROWTH_LB, GROWTH_UB = 20, 80  # px, MATLAB getAppearanceGrowth defaults
@@ -82,8 +83,9 @@ def plate_tables(plate_dir: Path, merged_growth: str = "exclude") -> tuple[pd.Da
     info = json.loads((plate_dir / "plate.json").read_text())
     use_merged = use_merged_frames(info, merged_growth)
     colonies = pd.read_parquet(plate_dir / "colonies.parquet")
-    if "flags_resolved" not in colonies:  # plates processed before flags could be resolved
-        colonies = colonies.assign(flags_resolved="")
+    colonies = colonies.assign(flags_reviewed=reviewed_column(colonies))
+    if "flags_resolved" in colonies:  # the column's name before November 2026
+        colonies = colonies.drop(columns="flags_resolved")
     tracks = pd.read_parquet(plate_dir / "tracks.parquet")
     included = colonies.set_index("colony_id").status == ColonyStatus.VALID
     if "bad_frame" not in tracks:  # plates processed before bad frames were detected
@@ -111,7 +113,7 @@ def plate_tables(plate_dir: Path, merged_growth: str = "exclude") -> tuple[pd.Da
     )
     cols = ["scanner", "plate", "colony_id", "status", "status_name", "auto_status", "included", "appearance_frame",
             "appearance_min", "appearance_h", f"growth_{GROWTH_LB}_{GROWTH_UB}px_min", "first_merged_min",
-            "final_area_px", "seed_x", "seed_y", "n_flags", "flags", "flags_resolved"]
+            "final_area_px", "seed_x", "seed_y", "n_flags", "flags", "flags_reviewed"]
     colonies = colonies[cols]
 
     tracks = tracks.assign(scanner=info["scanner"], plate=info["plate"])[
@@ -154,7 +156,7 @@ def export(results: Path, store: ResultsStore, log=print, plate_dirs: list[Path]
                         "n_included": int(colonies.included.sum()),
                         **{f"n_{s.name.lower()}": int(counts.get(s.name, 0)) for s in ColonyStatus},
                         "n_flagged_included": int(((colonies.n_flags > 0) & colonies.included).sum()),
-                        "n_flags_unresolved": int((unresolved_mask(colonies) & colonies.included).sum()),
+                        "n_flags_unreviewed": int((unreviewed_mask(colonies) & colonies.included).sum()),
                         "n_whole_plate": int(colonies.included.sum()) + final["n_rim"] if final else None,
                         "n_final_rim": final.get("n_rim"),
                         "n_final_inner": final.get("n_inner"), "n_final_full": final.get("n_full"),

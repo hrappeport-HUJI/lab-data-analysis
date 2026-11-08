@@ -34,10 +34,12 @@ larger than in the frames before and after (a blurred or badly lit scan, condens
 areas are ignored by the shrink, jump, flicker and gap checks, and the frames are listed in
 plate.json (``bad_frames``) and marked in the tracks table (``bad_frame``).
 
-Resolving: after checking a flagged colony, the reviewer can mark its flags as resolved (review window:
-the check box in the flagged list, or Ctrl+O). ``colonies.parquet``'s ``flags_resolved`` keeps the flag
-kinds resolved (``; ``-separated). A colony stays resolved while all its current flag kinds are among
-them, so a new kind raised by ``--reflag`` brings it back (``is_unresolved``).
+Reviewing: every flagged colony starts "to review". When the reviewer includes or excludes it (review
+window), it becomes "reviewed", and "Unreview" puts it back. ``colonies.parquet``'s ``flags_reviewed``
+keeps the flag kinds reviewed (``; ``-separated). A colony stays reviewed while all its current flag kinds
+are among them, so a new kind raised by ``--reflag`` brings it back (``is_unreviewed``). Plates without the
+column (reviewed before it existed) count a flagged colony as reviewed if the reviewer changed its status,
+and read an older ``flags_resolved`` column as reviewed (``reviewed_column``).
 
 Shape checks use the colony's mask in the last frame it is not merged (from colonies.zarr with
 the footprint tracker, else its blob in labels.zarr):
@@ -84,16 +86,29 @@ def kinds_of(flags: str | None) -> list[str]:
     return [re.split(r" \(| x\d| to \d", f)[0] for f in (flags or "").split("; ") if f]
 
 
-def is_unresolved(flags: str | None, resolved: str | None) -> bool:
-    """True if the colony has a flag kind that is not among the resolved ones."""
-    done = set(kinds_of(resolved))
+def is_unreviewed(flags: str | None, reviewed: str | None) -> bool:
+    """True if the colony has a flag kind that is not among the reviewed ones."""
+    done = set(kinds_of(reviewed))
     return any(k not in done for k in kinds_of(flags))
 
 
-def unresolved_mask(colonies: pd.DataFrame) -> np.ndarray:
-    """Per colony row: has unresolved flags (``flags_resolved`` missing: nothing resolved)."""
-    resolved = colonies["flags_resolved"] if "flags_resolved" in colonies else pd.Series("", index=colonies.index)
-    return np.array([is_unresolved(f, r) for f, r in zip(colonies["flags"], resolved.fillna(""))], bool)
+def reviewed_column(colonies: pd.DataFrame) -> pd.Series:
+    """``flags_reviewed`` of a colony table, derived for tables without it (module docstring)."""
+    if "flags_reviewed" in colonies:
+        return colonies["flags_reviewed"].fillna("").astype(str)
+    if "flags_resolved" in colonies:
+        old = colonies["flags_resolved"].fillna("").astype(str)
+    else:
+        old = pd.Series("", index=colonies.index)
+    if {"status", "auto_status"} <= set(colonies.columns):
+        decided = (colonies.status != colonies.auto_status) & (old == "")
+        old = old.where(~decided, ["; ".join(kinds_of(f)) for f in colonies["flags"]])
+    return old
+
+
+def unreviewed_mask(colonies: pd.DataFrame) -> np.ndarray:
+    """Per colony row: has flags that are not reviewed."""
+    return np.array([is_unreviewed(f, r) for f, r in zip(colonies["flags"], reviewed_column(colonies))], bool)
 
 
 def bad_frames(area: np.ndarray) -> list[int]:

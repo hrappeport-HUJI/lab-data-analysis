@@ -94,7 +94,7 @@ def test_qc_notes():
                        n_possible_doublets=0, bad_frames="")
     assert qc_notes(pd.DataFrame([quiet])) == []
     resolved = row | dict(tracked_vs_est=0.1, merge_excess=0.02, n_possible_doublets=0, bad_frames="",
-                          n_flags_unresolved=5)  # 50 flagged, 45 of them checked in the review
+                          n_flags_unreviewed=5)  # 50 flagged, 45 of them reviewed
     assert qc_notes(pd.DataFrame([resolved])) == []
 
 
@@ -145,47 +145,72 @@ def test_write_qc_on_a_tiny_plate(tmp_path):
     assert (store.root / "qc" / "S_p1_jump.png").stat().st_size > 1000
     table = pd.read_csv(store.root / "qc" / "qc.csv")
     assert table.n_flagged_included.tolist() == [1] and table.tracked_vs_est.tolist() == [0.0]
-    assert table.n_flags_unresolved.tolist() == [1]
+    assert table.n_flags_unreviewed.tolist() == [1]
     assert "bad frame(s) 3" in (store.root / "qc" / "notes.txt").read_text()
     assert json.loads((plate / "plate.json").read_text())["bad_frames"] == [3]
 
 
-def test_resolving_flags():
-    from scanlag.pipeline.flags import is_unresolved, kinds_of, unresolved_mask
+def test_reviewed_flags():
+    from scanlag.pipeline.flags import is_unreviewed, kinds_of, reviewed_column, unreviewed_mask
 
     assert kinds_of("shrinks to 46%; possible doublet (x1.7)") == ["shrinks", "possible doublet"]
-    assert is_unresolved("jump x2.1; gap (3 frames)", "jump")
-    assert not is_unresolved("jump x3.0", "jump")  # the numbers may change with --reflag, the kind doesn't
-    assert not is_unresolved("", "")
-    col = pd.DataFrame({"flags": ["jump x2.1", "gap (2 frames)", ""], "flags_resolved": ["jump", "", ""]})
-    assert unresolved_mask(col).tolist() == [False, True, False]
-    assert unresolved_mask(col.drop(columns="flags_resolved")).tolist() == [True, True, False]
+    assert is_unreviewed("jump x2.1; gap (3 frames)", "jump")
+    assert not is_unreviewed("jump x3.0", "jump")  # the numbers may change with --reflag, the kind doesn't
+    assert not is_unreviewed("", "")
+    col = pd.DataFrame({"flags": ["jump x2.1", "gap (2 frames)", ""], "flags_reviewed": ["jump", "", ""],
+                        "status": 0, "auto_status": 0})
+    assert unreviewed_mask(col).tolist() == [False, True, False]
+    old = pd.DataFrame({"flags": ["jump x2.1", "gap (2 frames)", "gap (1 frames)"], "status": [0, 2, 0],
+                        "auto_status": 0, "flags_resolved": ["jump", "", ""]})  # reviewed before the column
+    assert reviewed_column(old).tolist() == ["jump", "gap", ""]  # resolved, or status changed by hand
+    assert unreviewed_mask(old).tolist() == [False, False, True]
 
 
-def test_review_window_resolves_and_logs(tmp_path, monkeypatch):
+def test_review_window_lists_and_focus(tmp_path, monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    from PyQt5 import QtCore, QtWidgets
-    from scanlag.gui.review import ReviewWindow
+    from PyQt5 import QtWidgets
+    from scanlag.gui.review import EXCLUDED, VALID, ReviewWindow
 
     store, plate = tiny_plate(tmp_path, n_col=3)
+    col = pd.read_parquet(plate / "colonies.parquet")
+    col.loc[col.colony_id == 3, ["flags", "n_flags"]] = ["gap (1 frames)", 1]
+    col.to_parquet(plate / "colonies.parquet")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def pump():
+        for _ in range(3):
+            app.processEvents()
+
     w = ReviewWindow([plate])
     assert w.checks["Show excluded"].isChecked()
     assert "Exclude all" not in [b.text() for b in w.findChildren(QtWidgets.QPushButton)]
-    assert w._flag_ids == [1] and w.flag_count.text().startswith("1 of 1")
-    w.flag_list.item(0).setCheckState(QtCore.Qt.Checked)
-    for _ in range(3):
-        app.processEvents()
-    col = pd.read_parquet(plate / "colonies.parquet")
-    assert col.flags_resolved.tolist() == ["jump", "", ""]
-    assert w.flag_count.text().startswith("0 of 1")
-    w.select(1)
-    assert len(w.ring) == 2  # the close and the wide ring
-    w.flag_list.clearSelection()
-    w.toggle_resolved()  # Ctrl+O on a resolved colony unresolves it
-    assert pd.read_parquet(plate / "colonies.parquet").flags_resolved.tolist() == ["", "", ""]
+    assert w._ids == {"todo": [1, 3], "done": []}
+    w.FOCUS_MIN, w.FOCUS_RADII = 30, 2  # the test plate is only 200 px wide
+    w.lists["todo"].setCurrentRow(0)
+    pump()
+    assert w.selected == 1 and len(w.ring) == 2
+    x0, x1 = w.ax_img.get_xlim()
+    assert x1 - x0 < 150 and x0 < 100 < x1  # zoomed onto colony 1, centred at (100, 100)
+    w.set_selected(EXCLUDED)  # Ctrl+E
+    pump()
+    assert w._ids == {"todo": [3], "done": [1]} and w.plate.status(1) == EXCLUDED
+    assert w.lists["done"].item(0).foreground().color().name() == "#c62828"  # red: excluded
+    w.lists["todo"].setCurrentRow(0)
+    w.decide_selected("todo", VALID)
+    pump()
+    assert w._ids == {"todo": [], "done": [3, 1]}  # included first
+    assert w.lists["done"].item(0).foreground().color().name() == "#2e7d32"  # green: included
+    w.lists["done"].clearSelection()
+    w.lists["done"].setCurrentRow(1)  # colony 1
+    w.unreview_selected()  # Ctrl+U
+    pump()
+    assert w._ids == {"todo": [1], "done": [3]} and w.plate.status(1) == EXCLUDED  # status kept
+    saved = pd.read_parquet(plate / "colonies.parquet").set_index("colony_id").flags_reviewed
+    assert saved.to_dict() == {1: "", 2: "", 3: "gap"}
     log = json.loads((plate / "review.json").read_text())["log"]
-    assert [e["action"] for e in log] == ["resolve flags", "unresolve flags"]
+    assert [e["action"] for e in log] == ["exclude", "include selected", "unreview"]
+    w.full_view()
+    assert w.ax_img.get_xlim() == (-0.5, 199.5)
     w.close()
 
 
@@ -195,12 +220,15 @@ def test_export_review_tiles(tmp_path):
 
     store, plate = tiny_plate(tmp_path, n_col=3)
     col = pd.read_parquet(plate / "colonies.parquet")
-    col.loc[col.colony_id == 2, "status"] = 2  # excluded by the reviewer
-    col.loc[col.colony_id == 3, ["flags", "n_flags", "flags_resolved"]] = ["possible doublet (x1.8)", 1, "possible doublet"]
-    col["flags_resolved"] = col["flags_resolved"].fillna("")
+    col.loc[col.colony_id == 1, "status"] = 2  # excluded by the reviewer: "jump" -> a track tile
+    col.loc[col.colony_id == 2, "status"] = 2  # excluded, no flag: plain "excluded"
+    col.loc[col.colony_id == 3, ["flags", "n_flags"]] = ["possible doublet (x1.8)", 1]  # included, not reviewed
+    col["flags_reviewed"] = ["jump", "", ""]
     col.to_parquet(plate / "colonies.parquet")
     tiles = plate_review_tiles(plate)
-    assert sorted((t.colony_id, t.category) for t in tiles) == [(1, "track"), (2, "excluded")]  # 3 is resolved
+    assert sorted((t.colony_id, t.category) for t in tiles) == [(1, "track"), (2, "excluded")]
+    with_open = plate_review_tiles(plate, unreviewed=True)  # adds the unreviewed doublet
+    assert sorted((t.colony_id, t.category) for t in with_open) == [(1, "track"), (2, "excluded"), (3, "doublet")]
     out = ResultsStore(store.root / "training_tiles", store.raw_dirs)
     for t in tiles:
         folder = write_tile(plate, t, out)

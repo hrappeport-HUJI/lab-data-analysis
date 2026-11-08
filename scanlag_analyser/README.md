@@ -445,13 +445,13 @@ What to look at before the review, written by the pipeline after segmenting, `--
 raw scans (read only) and writes `<results>/qc/`:
 
 * `qc.csv`: one row per plate: `lag_growth_rho`, `lag_growth_p`, `lag_growth_n` (the appearance-vs-growth
-  control, section 6); `n_flags_unresolved`; `est_colonies` (density check) against `n_colonies` (tracked in the working
+  control, section 6); `n_flags_unreviewed`; `est_colonies` (density check) against `n_colonies` (tracked in the working
   area) as `tracked_vs_est`; `n_included`, `n_whole_plate`, `n_final_full`, `n_final_full_est` and
   `merge_excess` (`n_final_full_est / n_final_full - 1`, the colonies hidden in merged clusters at the end);
   `merged_share` (included colonies that ever merge); `n_flagged_included`, `flagged_share` and `flags`
   (counts per flag kind); `n_possible_doublets`; `bad_frames`; `reviewed`
 * `notes.txt`: one line per thing worth a look: a tracked count more than 50 % off the estimate, more than
-  15 % of included colonies with unresolved flags, merge excess above 10 %, more than 2 % possible doublets,
+  15 % of included colonies flagged and not reviewed yet, merge excess above 10 %, more than 2 % possible doublets,
   bad frames, a plate where appearance and growth rate correlate (Spearman rho < −0.3, p < 0.01); and, on
   every run, the appearance-vs-growth control per scanner (`control, <scanner>: ...`). Thresholds at the
   top of `qc.py`
@@ -506,46 +506,54 @@ scans** at the path stored in each `plate.json`, so the raw data must be reachab
 ### Layout
 
 * **Top bar:** plate selector with ◀ ▶, *Find colony no.* box (type a number, press Enter), buttons
-  *Exclude (Ctrl+E)*, *Include (Ctrl+I)*, *Resolve flags (Ctrl+O)*, *Reset plate*, *◀ flagged*, *flagged ▶ (F)*,
+  *Exclude (Ctrl+E)*, *Include (Ctrl+I)*, *Unreview (Ctrl+U)*, *Reset plate*, *Full plate (Esc)*, *◀ flagged*,
+  *flagged ▶ (F)*,
   check boxes, and *Finish & export*.
 * **Left:** the plate image (last frame by default), with a time slider under it.
   Below that: the image layer (*Raw* or *Difference (frame − background)*, which is what MATLAB
   thresholds), *Black* / *White* level sliders and *Auto contrast*.
 * **Middle:** area of each colony over time (log scale by default); a dashed line marks the current frame.
   Each panel has a matplotlib toolbar for zoom and pan (while zoom/pan is active, clicks do not select).
-* **Right:** list of **flagged colonies** (check these first), each with a check box (ticked = flags
-  resolved), a box above it to show one kind of flag only, *Hide resolved*, a count of the unresolved
-  flagged colonies, *Exclude selected* / *Exclude all listed* buttons below it, and details of the selected
-  colony (status, detected status, appearance time, final area, first merge, flags and whether they are
-  resolved).
+* **Right:** the **flagged colonies** in two lists, **To review** above and **Reviewed** below (section
+  below), a box above them to show one kind of flag only, *Include selected* / *Exclude selected* under each
+  list, *Exclude all to review* and *Unreview selected*, and details of the selected colony (status,
+  detected status, appearance time, final area, first merge, flags and whether they are reviewed).
 
-Click a colony on the plate, its curve in the graph or its line in the flagged list to select it: a cyan
-ring around it and a wide yellow ring (to find it on a crowded plate), and a thick curve.
+Click a colony on the plate, its curve in the graph or its line in a list to select it: a cyan ring around
+it and a wide yellow ring (to find it on a crowded plate), and a thick curve. Selecting it from a **list,
+the graph or *Find colony no.*** also centres the plate image on it, zoomed in so that its neighbours stay
+visible (half width 110 px or 7 colony radii, whichever is larger); **Esc** or *Full plate* shows the whole
+plate again (as does the image toolbar's Home button). Clicking on the plate selects without moving the view.
 
-### Resolving flags
+### Reviewing flagged colonies
 
-A flag asks you to look at a colony; often it is fine (a correct split in a cluster, a doublet that is one
-colony). Resolve its flags with the **check box** in front of it in the flagged list, or **Ctrl+O** (Cmd+O on
-a Mac) for the colonies selected in the list (or the selected colony). Unticking, or Ctrl+O on resolved
-colonies, undoes it. A resolved colony loses its orange "!" on the plate, is listed after the open ones in
-green, is skipped by F / Shift+F, and is hidden by *Hide resolved*. Excluding a colony needs no resolving.
+Every flagged colony starts in **To review**. Look at it, then include it (**Ctrl+I**, or *Include selected*)
+or exclude it (**Ctrl+E**, or *Exclude selected*): it moves to **Reviewed**. In both lists **green means
+included and red excluded**, so a colony excluded before review is red in *To review*. **Unreview**
+(**Ctrl+U**, or *Unreview selected*) moves the colonies selected in *Reviewed* (or the selected colony) back
+to *To review*, keeping their status, to think about them again. F / Shift+F step through *To review*;
+colonies still to review keep their orange "!" on the plate. *Exclude all to review* excludes every colony
+*To review* lists (after the flag-kind box), asking first. Including or excluding any flagged colony, also
+from the plate, marks it reviewed.
 
-The resolved flag kinds are saved in `colonies.parquet`'s `flags_resolved` and logged in `review.json`. A
-colony stays resolved while all its current flag kinds are resolved, so a new kind raised later by
-`--reflag` shows it again. `summary.csv` and the QC report count `n_flags_unresolved`, and
-`export_review_tiles.py` makes training tiles only from unresolved segmentation flags (section 12).
+The reviewed flag kinds are saved in `colonies.parquet`'s `flags_reviewed` and logged in `review.json`. A
+colony stays reviewed while all its current flag kinds are reviewed, so a new kind raised later by
+`--reflag` puts it back in *To review*. On plates reviewed before the lists existed, colonies whose status
+you changed count as reviewed. `summary.csv` and the QC report count `n_flags_unreviewed`, and the colonies
+you excluded become training tiles (`export_review_tiles.py`, section 12).
 
 ### Keyboard shortcuts
 
 | Key | Action |
 |---|---|
-| Ctrl+E | Exclude the selected colony |
-| Ctrl+I | Include the selected colony (also works for a colony excluded automatically, e.g. near the border) |
-| Ctrl+O (Cmd+O on a Mac) | Resolve / unresolve the flags of the colonies selected in the flagged list, or of the selected colony |
+| Ctrl+E | Exclude the selected colony (a flagged one moves to *Reviewed*) |
+| Ctrl+I | Include the selected colony (also works for a colony excluded automatically, e.g. near the border; a flagged one moves to *Reviewed*) |
+| Ctrl+U (Cmd+U on a Mac) | Unreview: the colonies selected in *Reviewed*, or the selected colony, back to *To review* |
+| Esc | Show the whole plate (after a zoom onto a colony) |
 | Left / Right | Previous / next frame |
 | Home / End | First / last frame |
 | Page Up / Page Down | Previous / next plate |
-| F / Shift+F | Next / previous included colony with unresolved flags |
+| F / Shift+F | Next / previous colony in *To review* |
 | Enter (in *Find colony no.*) | Select that colony |
 
 ### Check boxes
@@ -565,7 +573,7 @@ colony stays resolved while all its current flag kinds are resolved, so a new ki
 |---|---|
 | white | included |
 | red | included, appears in this frame |
-| orange with "!" | included, with unresolved flags |
+| orange with "!" | included, flagged and still to review |
 | magenta | near the border (excluded automatically) |
 | yellow, bold | excluded by you |
 | gray | zero area in the last frame (excluded automatically) |
@@ -577,23 +585,23 @@ own colour; with "Labels only", the line where their blob was split is white. On
 
 ### Bulk actions
 
-* **Flagged list:** choose a flag kind in the box above the list (e.g. *large at appearance*) to list only those
-  colonies. *Exclude selected* excludes the colonies selected in the list (Ctrl+click / Shift+click to select
-  several); *Exclude all listed* excludes every included colony the list shows. Both ask first and are logged
-  in `review.json` as `exclude flagged: <kind>`.
-* **Reset plate** undoes all your changes on the current plate and returns to the automatic statuses
-  (asks first).
+* **Flagged lists:** choose a flag kind in the box above the lists (e.g. *large at appearance*) to list only
+  those colonies. *Include selected* / *Exclude selected* decide the colonies selected in a list (Ctrl+click /
+  Shift+click to select several); *Exclude all to review* excludes every colony *To review* shows (asks first).
+* **Reset plate** undoes all your changes on the current plate: back to the automatic statuses, and every
+  flagged colony to review again (asks first).
 
 ### What is saved, and where
 
 Every change is saved **immediately**; you can close the window at any time and reopen it later.
 
 * `<results>/<scanner>/plate_<k>/colonies.parquet`: columns `status` and `status_name` are updated
-  (`auto_status` keeps the original automatic status), and `flags_resolved` holds the resolved flag kinds.
+  (`auto_status` keeps the original automatic status), and `flags_reviewed` holds the reviewed flag kinds.
 * `<results>/<scanner>/plate_<k>/review.json`: `{"visited": true/false, "log": [...]}`, an append-only log.
-  Single changes are logged as `{"time", "colony_id", "from", "to"}`, bulk actions as
-  `{"time", "action": "exclude flagged: <kind>" | "reset" | "resolve flags" | "unresolve flags", "colony_ids": [...]}`
-  (plates reviewed before November 2026 may also hold `"exclude all"`, a button that no longer exists). `visited` becomes true when the
+  Decisions are logged as `{"time", "action": "include" | "exclude" | "include selected" | "exclude selected" |
+  "exclude flagged: <kind>", "to": <status>, "colony_ids": [...]}`, and `{"time", "action": "unreview" |
+  "reset", "colony_ids": [...]}`. Plates reviewed before November 2026 also hold single changes as
+  `{"time", "colony_id", "from", "to"}`, and possibly `"exclude all"` (a button that no longer exists). `visited` becomes true when the
   plate is opened.
 
 **Finish & export** (warns if some plates shown in the window were never opened) writes the CSV tables for
@@ -821,7 +829,7 @@ Only frames in which the colony is detected (area > 0) have a row.
 | `final_area_px` | Area in the last frame |
 | `seed_x`, `seed_y` | The colony's seed pixel (0-based, plate-crop coordinates) |
 | `flags`, `n_flags` | Review flags (text separated by `; `) and their number. In pandas, read the column as `df["flags"]`: `df.flags` is a DataFrame attribute |
-| `flags_resolved` | The flag kinds the reviewer resolved (section 5, Resolving flags), `; `-separated |
+| `flags_reviewed` | The flag kinds the reviewer reviewed, by including or excluding the colony (section 5, Reviewing flagged colonies), `; `-separated |
 
 ### `area_matrix.csv` (per plate)
 
@@ -833,7 +841,7 @@ Rows = frames; first column `time_min`, then one column `colony_<id>` per **incl
 `scanner, plate, reviewed` (plate opened in the window), `n_colonies, n_included, n_valid, n_near_border,
 n_manually_excluded, n_zero_final_area, n_flagged_included`, and the whole-plate counts `n_whole_plate,
 n_final_rim, n_final_inner, n_final_full, n_final_full_est, final_fraction` (section 4, Whole-plate count),
-`n_flags_unresolved` (included flagged colonies whose flags were not resolved in the review),
+`n_flags_unreviewed` (included flagged colonies not reviewed yet),
 `n_possible_doublets` (included colonies flagged as possible doublets: the plate likely holds that many more
 colonies than `n_whole_plate`) and `bad_frames` (space-separated frame numbers). Note: here `plate` is the folder name
 (`plate_1`), while elsewhere it is a number.
@@ -1166,21 +1174,23 @@ build_testset.py  →  select_tiles.py  →  annotate_tiles.py  →  train_unet.
 ### Training tiles from a review (`export_review_tiles.py`)
 
 ```
-python scripts/export_review_tiles.py <results folder> [--out DIR] [--per-plate 20] [--categories ...] [--include-unreviewed]
+python scripts/export_review_tiles.py <results folder> [--out DIR] [--per-plate 20] [--categories ...] [--unreviewed] [--include-unreviewed]
 ```
 
-After the colony review, writes 256 px tiles where the review found the detector wrong
-(`scanlag/train/review_tiles.py`), for the reviewed plates only (unless `--include-unreviewed`):
+After the colony review, writes 256 px tiles where the review found detection or tracking wrong
+(`scanlag/train/review_tiles.py`), for the reviewed plates only (unless `--include-unreviewed`). Every colony
+you excluded gives one tile, in the category of its flags:
 
-| Category | Colonies | Frame |
+| Category | Colonies you excluded with | Frame |
 |---|---|---|
-| `excluded` | excluded by you (debris, writing, reflections, pieces of other colonies) | its last frame |
-| `doublet` | included, `possible doublet` not resolved | appearance + 4 frames |
-| `split` | included, `irregular split` not resolved | last frame |
-| `fragment` | included, `large at appearance` not resolved | appearance frame |
-| `track` | included, `jump` or `flicker` not resolved | the frame of its largest area change |
+| `doublet` | `possible doublet` | appearance + 4 frames |
+| `split` | `irregular split` | last frame |
+| `fragment` | `large at appearance` | appearance frame |
+| `track` | `jump` or `flicker` | the frame of its largest area change |
+| `excluded` | none of these (debris, writing, reflections, specks) | its last frame |
 
-A resolved flag means the colony was fine and gives no tile; at most `--per-plate` tiles per plate, spread
+Colonies you included were fine and give no tile. `--unreviewed` also takes included colonies whose
+segmentation flags (the four kinds above) you haven't reviewed. At most `--per-plate` tiles per plate, spread
 over the categories, and no two overlapping tiles of the same frame. The tiles go to
 `<results>/training_tiles/` in the layout of the MATLAB gold set: `manual/tile_<scanner>_p<plate>_c<colony>_<category>/`
 with `image.png`, `background.png`, `previous.png`, `labels_init.png` (the pipeline's colonies, and every other

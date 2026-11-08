@@ -78,9 +78,9 @@ def plate_qc(plate_dir: Path, density: pd.DataFrame | None = None) -> dict:
         est = float(row.est_colonies.iloc[0]) if len(row) else None
     n_col = len(col)  # tracked in the working area, near the border included, as the estimate
     kinds = flag_kinds(inc["flags"]).value_counts()
-    from scanlag.pipeline.flags import unresolved_mask
+    from scanlag.pipeline.flags import unreviewed_mask
 
-    open_flags = int(unresolved_mask(inc).sum()) if len(inc) else 0
+    open_flags = int(unreviewed_mask(inc).sum()) if len(inc) else 0
     review = plate_dir / "review.json"
     full, full_est = final.get("n_full"), final.get("n_full_est")
     from scanlag.analysis.conditions import appearance_growth_correlation
@@ -98,7 +98,7 @@ def plate_qc(plate_dir: Path, density: pd.DataFrame | None = None) -> dict:
         "merged_share": float((inc.first_merged_frame >= 0).mean()) if len(inc) else None,
         "n_flagged_included": int((inc.n_flags > 0).sum()),
         "flagged_share": float((inc.n_flags > 0).mean()) if len(inc) else None,
-        "n_flags_unresolved": open_flags,
+        "n_flags_unreviewed": open_flags,
         "n_possible_doublets": int(kinds.get("possible doublet", 0)),
         "bad_frames": " ".join(map(str, info.get("bad_frames") or [])),
         "lag_growth_rho": rho, "lag_growth_p": p, "lag_growth_n": n_ag,
@@ -114,9 +114,9 @@ def qc_notes(table: pd.DataFrame) -> list[str]:
         if r.tracked_vs_est is not None and np.isfinite(r.tracked_vs_est) and abs(r.tracked_vs_est) > EST_OFF:
             notes.append(f"{name}: {r.n_colonies} colonies tracked against {r.est_colonies:.0f} estimated by the "
                          f"density check ({r.tracked_vs_est:+.0%}): look at the outline picture")
-        open_flags = getattr(r, "n_flags_unresolved", r.n_flagged_included)
+        open_flags = getattr(r, "n_flags_unreviewed", r.n_flagged_included)
         if r.n_included and open_flags / r.n_included > FLAGGED_SHARE:
-            notes.append(f"{name}: {open_flags} of {r.n_included} included colonies have unresolved flags "
+            notes.append(f"{name}: {open_flags} of {r.n_included} included flagged colonies not reviewed yet "
                          f"({open_flags / r.n_included:.0%}): {r.flags}")
         if r.merge_excess is not None and r.merge_excess > MERGE_EXCESS:
             notes.append(f"{name}: merged clusters at the end hold about {r.n_final_full_est - r.n_final_full} "

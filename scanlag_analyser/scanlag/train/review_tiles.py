@@ -1,19 +1,18 @@
 """Training tiles from a reviewed run: the places where the review found the detector wrong.
 
-After the colony review, some decisions point at segmentation errors the U-Net could learn from:
+A colony the reviewer excluded by hand is a place where detection or tracking went wrong, and its flags
+say how. Each such colony gives one tile, in the category of its first matching flag:
 
-* ``excluded``: colonies the reviewer excluded by hand (debris, writing, reflections, pieces of
-  other colonies), at their last frame
-* ``doublet``: included colonies flagged "possible doublet" and not resolved: two colonies that
-  touched when first detected, so the detector never separated them; at the appearance frame + 4,
-  when both are visible and still small
-* ``split``: "irregular split" not resolved: the merged blob was divided badly; at the last frame
-* ``fragment``: "large at appearance" not resolved: a piece split off a neighbour; at the appearance
-  frame
-* ``track``: "jump" or "flicker" not resolved: the segmentation switched between frames; at the
-  frame of the largest area change
+* ``doublet`` ("possible doublet"): two colonies that touched when first detected, so the detector
+  never separated them; at the appearance frame + 4, when both are visible and still small
+* ``split`` ("irregular split"): the merged blob was divided badly; at the last frame
+* ``fragment`` ("large at appearance"): a piece split off a neighbour; at the appearance frame
+* ``track`` ("jump" or "flicker"): the segmentation switched between frames; at the frame of the
+  largest area change
+* ``excluded`` (no such flag: debris, writing, reflections, a speck): at its last frame
 
-A flag the reviewer resolved means the colony was fine, so it gives no tile. Each tile is TILE x TILE
+Colonies the reviewer included are fine and give no tile. With ``unreviewed=True``, included flagged
+colonies not reviewed yet also give tiles, by the same categories (their flags may or may not be errors). Each tile is TILE x TILE
 px around the colony, written in the layout of the MATLAB gold set (``scanlag.testset.tiles``):
 
     <out>/manual/tile_<scanner>_p<plate>_c<colony>_<category>/
@@ -75,29 +74,38 @@ def tile_frame(category: str, colony: pd.Series, track: pd.DataFrame, n_frames: 
     return int(track.sort_values("frame").frame.iloc[int(np.argmax(change)) + 1])
 
 
-def plate_review_tiles(plate_dir: Path, categories=CATEGORIES, per_plate: int = 20) -> list[ReviewTile]:
-    """The tiles of one reviewed plate, at most ``per_plate`` (spread over the categories), without
-    two tiles of the same frame overlapping by more than half."""
-    from scanlag.pipeline.flags import is_unresolved
+def category_of(kinds) -> str:
+    """The tile category of a colony with these flag kinds (``excluded`` if none matches)."""
+    for cat, names in CATEGORY_KINDS.items():
+        if set(kinds) & set(names):
+            return cat
+    return "excluded"
+
+
+def plate_review_tiles(plate_dir: Path, categories=CATEGORIES, per_plate: int = 20,
+                       unreviewed: bool = False) -> list[ReviewTile]:
+    """The tiles of one reviewed plate (module docstring), at most ``per_plate`` (spread over the
+    categories), without two tiles of the same frame overlapping by more than half."""
+    from scanlag.pipeline.flags import is_unreviewed, reviewed_column
 
     plate_dir = Path(plate_dir)
     info = json.loads((plate_dir / "plate.json").read_text())
     col = pd.read_parquet(plate_dir / "colonies.parquet")
-    resolved = col["flags_resolved"].fillna("") if "flags_resolved" in col else pd.Series("", index=col.index)
+    reviewed = reviewed_column(col)
     tracks = pd.read_parquet(plate_dir / "tracks.parquet")
     n_frames, size = len(info["times_min"]), info["crop_xy_size"][2]
     wanted: list[tuple[str, pd.Series]] = []
     for i, c in col.iterrows():
-        if "excluded" in categories and c.status == ColonyStatus.MANUALLY_EXCLUDED and c.auto_status == ColonyStatus.VALID:
-            wanted.append(("excluded", c))
+        if c.status == ColonyStatus.MANUALLY_EXCLUDED and c.auto_status == ColonyStatus.VALID:
+            cat = category_of(kinds_of(c["flags"]))
+        elif unreviewed and c.status == ColonyStatus.VALID and is_unreviewed(c["flags"], reviewed.at[i]):
+            cat = category_of(set(kinds_of(c["flags"])) - set(kinds_of(reviewed.at[i])))
+            if cat == "excluded":  # an unreviewed flag that is no segmentation error (e.g. gap, shape)
+                continue
+        else:
             continue
-        if c.status != ColonyStatus.VALID or not is_unresolved(c["flags"], resolved.at[i]):
-            continue
-        open_kinds = set(kinds_of(c["flags"])) - set(kinds_of(resolved.at[i]))
-        for cat in categories:
-            if cat in CATEGORY_KINDS and open_kinds & set(CATEGORY_KINDS[cat]):
-                wanted.append((cat, c))
-                break
+        if cat in categories:
+            wanted.append((cat, c))
     # round robin over the categories, so one kind doesn't take every slot
     by_cat = {cat: [w for w in wanted if w[0] == cat] for cat in categories}
     order = [by_cat[cat][j] for j in range(max(map(len, by_cat.values()), default=0)) for cat in categories

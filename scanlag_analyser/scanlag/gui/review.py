@@ -6,18 +6,20 @@ the graph to select it in both. Ctrl+E excludes it, Ctrl+I includes it. "Find co
 Colony numbers use PlateAnalyzer's colours: white, red when the colony appears in this frame, magenta
 near the border, yellow excluded.
 
-New: colonies with a suspicious track or shape (``scanlag.pipeline.flags``) are listed on the right
-and marked on the plate with an orange "!" and a ring. F / Shift+F step through them. The box above
-the list shows one kind of flag only (e.g. "large at appearance", pieces split off a neighbour);
-"Exclude selected" excludes the colonies selected in the list (Ctrl/Shift+click for several) and
-"Exclude all listed" every included colony the list shows. After checking a flagged colony that is
-fine, resolve its flags with the check box in front of it (or Ctrl+O, Cmd+O on a Mac, for the colonies
-selected in the list or on the plate); unticking undoes it. Resolved colonies lose their "!", F skips
-them, and "Hide resolved" hides them from the list. They are saved in colonies.parquet's
-``flags_resolved`` (scanlag.pipeline.flags, Resolving) and logged in review.json.
+Flagged colonies (suspicious track or shape, ``scanlag.pipeline.flags``) are listed on the right in
+two lists. "To review" starts with every flagged colony; marked on the plate with an orange "!". Include
+(Ctrl+I) or exclude (Ctrl+E) a colony and it moves to "Reviewed". In both lists green means included and
+red excluded. "Unreview" (Ctrl+U) moves the selected reviewed colonies back to "To review", keeping their
+status, to think about them again. F / Shift+F step through "To review". The box above the lists shows
+one kind of flag only (e.g. "large at appearance", pieces split off a neighbour); "Include selected" /
+"Exclude selected" decide the colonies selected in a list (Ctrl/Shift+click for several), "Exclude all to
+review" every listed colony still to review. Reviewed flag kinds are saved in colonies.parquet's
+``flags_reviewed`` (scanlag.pipeline.flags, Reviewing) and logged in review.json.
 
-The selected colony is marked by two rings: a cyan one around it and a wide yellow one, to find it
-quickly on a crowded plate.
+Clicking a colony in a list or its curve in the graph centres the plate image on it, zoomed in with its
+neighbourhood still visible; Esc (or "Full plate") shows the whole plate again. Clicking on the plate
+selects without moving the view. The selected colony is marked by two rings: a cyan one around it and
+a wide yellow one, to find it quickly on a crowded plate.
 
 With the footprint tracker (the default), merged colonies keep their own colour and the line
 where their blob was split is drawn in white ("Labels only") or as outlines. With the seed tracker,
@@ -30,7 +32,7 @@ Below the plate: the time slider (redraws while dragging; numbers come back on r
 image layer (raw scan or gray(frame - background), the difference MATLAB thresholds) and its
 black/white levels, with "Auto contrast" to reset them from the current frame.
 
-Keys: Ctrl+E exclude, Ctrl+I include, Ctrl+O resolve / unresolve flags, Left/Right one frame, Home/End first/last frame,
+Keys: Ctrl+E exclude, Ctrl+I include, Ctrl+U unreview, Esc full plate, Left/Right one frame, Home/End first/last frame,
 PageUp/PageDown previous/next plate, F/Shift+F next/previous flagged colony.
 """
 
@@ -61,7 +63,7 @@ from skimage.segmentation import find_boundaries
 from scanlag.detect.classical import subtract_background
 from scanlag.io.matlab_import import ColonyStatus
 from scanlag.io.raw import read_scan
-from scanlag.pipeline.flags import is_unresolved, kinds_of
+from scanlag.pipeline.flags import is_unreviewed, kinds_of, reviewed_column
 from scanlag.pipeline.plates import crop
 from scanlag.pipeline.run import merged_area_is_own
 
@@ -85,9 +87,8 @@ class PlateData:
         self.dir = Path(plate_dir)
         self.info = json.loads((self.dir / "plate.json").read_text())
         self.colonies = pd.read_parquet(self.dir / "colonies.parquet")
-        if "flags_resolved" not in self.colonies:  # plates processed before flags could be resolved
-            self.colonies["flags_resolved"] = ""
-        self.colonies["flags_resolved"] = self.colonies["flags_resolved"].fillna("")
+        self.colonies["flags_reviewed"] = reviewed_column(self.colonies)  # derived for older plates
+        self.colonies = self.colonies.drop(columns=["flags_resolved"], errors="ignore")  # its old name
         self.tracks = pd.read_parquet(self.dir / "tracks.parquet")
         self.labels = zarr.open_array(str(self.dir / "labels.zarr"), mode="r")
         # colony IDs per pixel (footprint tracker); None for the seed tracker
@@ -128,26 +129,44 @@ class PlateData:
     def flags(self, cid: int) -> str:
         return self.colonies["flags"].iat[cid - 1] or ""
 
-    def resolved(self, cid: int) -> bool:
-        """The colony has flags and all of them are resolved."""
-        return bool(self.flags(cid)) and not is_unresolved(self.flags(cid), self.colonies["flags_resolved"].iat[cid - 1])
+    def reviewed(self, cid: int) -> bool:
+        """The colony has flags and all of them are reviewed."""
+        return bool(self.flags(cid)) and not is_unreviewed(self.flags(cid), self.colonies["flags_reviewed"].iat[cid - 1])
 
-    def open_flags(self, cid: int) -> bool:
-        """The colony has flags that are not resolved."""
-        return is_unresolved(self.flags(cid), self.colonies["flags_resolved"].iat[cid - 1])
+    def to_review(self, cid: int) -> bool:
+        """The colony has flags that are not reviewed."""
+        return is_unreviewed(self.flags(cid), self.colonies["flags_reviewed"].iat[cid - 1])
 
-    def set_resolved(self, ids, on: bool) -> int:
-        """Resolve (``on``) or unresolve the flags of the given colonies; returns the number changed."""
+    def _mark(self, ids, on: bool) -> list[int]:
         changed = []
         for cid in ids:
-            if not self.flags(cid) or self.resolved(cid) == on:
-                continue
-            self.colonies.loc[self.colonies.colony_id == cid, "flags_resolved"] = (
-                "; ".join(kinds_of(self.flags(cid))) if on else "")
-            changed.append(int(cid))
+            if self.flags(cid) and self.reviewed(cid) != on:
+                self.colonies.loc[self.colonies.colony_id == cid, "flags_reviewed"] = (
+                    "; ".join(kinds_of(self.flags(cid))) if on else "")
+                changed.append(int(cid))
+        return changed
+
+    def decide(self, ids, status: int, action: str) -> int:
+        """Set the status of the given colonies and mark the flagged ones reviewed; returns how many
+        changed (status or review mark)."""
+        ids = [int(c) for c in ids]
+        old = {c: self.status(c) for c in ids}
+        sel = self.colonies.colony_id.isin(ids)
+        self.colonies.loc[sel, ["status", "status_name"]] = [status, ColonyStatus(status).name]
+        marked = self._mark(ids, True)
+        changed = sorted({c for c in ids if old[c] != status} | set(marked))
         if changed:
-            self.review["log"].append({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                       "action": "resolve flags" if on else "unresolve flags", "colony_ids": changed})
+            self.review["log"].append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "action": action,
+                                       "to": status, "colony_ids": changed})
+            self.save()
+        return len(changed)
+
+    def unreview(self, ids) -> int:
+        """Move reviewed colonies back to "to review" (their status stays)."""
+        changed = self._mark(ids, False)
+        if changed:
+            self.review["log"].append({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "action": "unreview",
+                                       "colony_ids": changed})
             self.save()
         return len(changed)
 
@@ -214,8 +233,13 @@ class PlateData:
         return self.set_statuses(s.where(~(self.colonies.colony_id.isin(ids) & (s == VALID)), EXCLUDED), action)
 
     def reset(self) -> int:
-        """Undo all review changes: back to the statuses the detection gave."""
-        return self.set_statuses(self.colonies.auto_status, "reset")
+        """Undo all review changes: back to the statuses the detection gave, every flag to review."""
+        unmarked = int((self.colonies["flags_reviewed"] != "").sum())
+        self.colonies["flags_reviewed"] = ""
+        n = self.set_statuses(self.colonies.auto_status, "reset")
+        if unmarked and not n:
+            self.save()
+        return max(n, unmarked)
 
     def n_changed(self) -> int:
         return int((self.colonies.status != self.colonies.auto_status).sum())
@@ -288,7 +312,8 @@ class ReviewWindow(QtWidgets.QMainWindow):
         bar.addSpacing(20)
         for text, slot in (("Exclude (Ctrl+E)", lambda: self.set_selected(EXCLUDED)),
                            ("Include (Ctrl+I)", lambda: self.set_selected(VALID)),
-                           ("Resolve flags (Ctrl+O)", self.toggle_resolved), ("Reset plate", self.reset_plate),
+                           ("Unreview (Ctrl+U)", self.unreview_selected), ("Reset plate", self.reset_plate),
+                           ("Full plate (Esc)", self.full_view),
                            ("◀ flagged", lambda: self.step_flag(-1)), ("flagged ▶ (F)", lambda: self.step_flag(1))):
             b = QtWidgets.QPushButton(text)
             b.clicked.connect(slot)
@@ -371,30 +396,32 @@ class ReviewWindow(QtWidgets.QMainWindow):
         body.addLayout(left, 1)
 
         side = QtWidgets.QVBoxLayout()
-        side.addWidget(QtWidgets.QLabel("<b>Flagged colonies</b> (check these; tick = resolved)"))
-        kind_row = QtWidgets.QHBoxLayout()
         self.flag_kind = QtWidgets.QComboBox()
         self.flag_kind.currentIndexChanged.connect(self.change_flag_kind)
-        kind_row.addWidget(self.flag_kind, 1)
-        self.hide_resolved = QtWidgets.QCheckBox("Hide resolved")
-        self.hide_resolved.toggled.connect(self.change_flag_kind)
-        kind_row.addWidget(self.hide_resolved)
-        side.addLayout(kind_row)
-        self.flag_count = QtWidgets.QLabel()
-        side.addWidget(self.flag_count)
-        self.flag_list = QtWidgets.QListWidget()
-        self.flag_list.setMinimumWidth(330)
-        self.flag_list.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.flag_list.currentRowChanged.connect(self.flag_row_selected)
-        self.flag_list.itemChanged.connect(self.flag_item_checked)
-        side.addWidget(self.flag_list, 1)
-        flag_buttons = QtWidgets.QHBoxLayout()
-        for text, slot in (("Exclude selected", self.exclude_selected_flagged),
-                           ("Exclude all listed", self.exclude_listed_flagged)):
-            b = QtWidgets.QPushButton(text)
-            b.clicked.connect(slot)
-            flag_buttons.addWidget(b)
-        side.addLayout(flag_buttons)
+        side.addWidget(QtWidgets.QLabel("<b>Flagged colonies</b> &nbsp; "
+                                        "<span style='color:#2e7d32'>green: included</span>, "
+                                        "<span style='color:#c62828'>red: excluded</span>"))
+        side.addWidget(self.flag_kind)
+        self.lists, self.list_labels, self._ids = {}, {}, {"todo": [], "done": []}
+        for key in ("todo", "done"):
+            self.list_labels[key] = QtWidgets.QLabel()
+            side.addWidget(self.list_labels[key])
+            lw = QtWidgets.QListWidget()
+            lw.setMinimumWidth(330)
+            lw.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+            lw.itemSelectionChanged.connect(lambda key=key: self.list_selection_changed(key))
+            self.lists[key] = lw
+            side.addWidget(lw, 3 if key == "todo" else 2)
+            row = QtWidgets.QHBoxLayout()
+            buttons = (("Include selected", lambda key=key: self.decide_selected(key, VALID)),
+                       ("Exclude selected", lambda key=key: self.decide_selected(key, EXCLUDED)))
+            buttons += ((("Exclude all to review", self.exclude_all_to_review),) if key == "todo" else
+                        (("Unreview selected", self.unreview_selected),))
+            for text, slot in buttons:
+                b = QtWidgets.QPushButton(text)
+                b.clicked.connect(slot)
+                row.addWidget(b)
+            side.addLayout(row)
         self.info_label = QtWidgets.QLabel()
         self.info_label.setWordWrap(True)
         self.info_label.setTextFormat(QtCore.Qt.RichText)
@@ -408,7 +435,7 @@ class ReviewWindow(QtWidgets.QMainWindow):
         self.canvas.mpl_connect("button_press_event", self.on_click)
         self.canvas_graph.mpl_connect("pick_event", self.on_pick)
         for keys, slot in (("Ctrl+E", lambda: self.set_selected(EXCLUDED)), ("Ctrl+I", lambda: self.set_selected(VALID)),
-                           ("Ctrl+O", self.toggle_resolved),
+                           ("Ctrl+U", self.unreview_selected), ("Esc", self.full_view),
                            ("Left", lambda: self.slider.setValue(self.k - 1)), ("Right", lambda: self.slider.setValue(self.k + 1)),
                            ("Home", lambda: self.slider.setValue(0)), ("End", lambda: self.slider.setValue(self.slider.maximum())),
                            ("PgUp", lambda: self.step_plate(-1)), ("PgDown", lambda: self.step_plate(1)),
@@ -425,6 +452,7 @@ class ReviewWindow(QtWidgets.QMainWindow):
         self.plate.save()
         self.selected = None
         self.ax_img.clear()
+        self.toolbar.update()  # forget the previous plate's zoom history
         self.img_artist, self.texts, self.ring = None, [], []
         self.slider.blockSignals(True)
         self.slider.setRange(0, self.plate.n_frames - 1)
@@ -561,7 +589,7 @@ class ReviewWindow(QtWidgets.QMainWindow):
         if self.checks["Numbers"].isChecked() and not fast:
             for c in present:
                 s = p.status(c)
-                flagged = p.open_flags(c)  # resolved flags no longer mark the colony
+                flagged = p.to_review(c)  # reviewed colonies lose their "!"
                 # PlateAnalyzer order: status colour (excluded yellow, near border magenta) wins over
                 # "new in this frame" red; flagged included colonies are orange.
                 if s != VALID:
@@ -574,7 +602,8 @@ class ReviewWindow(QtWidgets.QMainWindow):
                     color = STATUS_TEXT[VALID]
                 label = f"{c}!" if flagged else str(c)
                 t = self.ax_img.text(p.cx[k, c], p.cy[k, c], label, fontsize=7, ha="center", va="center",
-                                     color=color, fontweight="bold" if flagged or s == EXCLUDED else "normal")
+                                     color=color, fontweight="bold" if flagged or s == EXCLUDED else "normal",
+                                     clip_on=True)  # no numbers in the margins when zoomed in
                 t.set_path_effects([patheffects.withStroke(linewidth=1.5, foreground="black")])
                 self.texts.append(t)
         self.draw_ring()
@@ -655,15 +684,44 @@ class ReviewWindow(QtWidgets.QMainWindow):
             line.set_path_effects([patheffects.withStroke(linewidth=5, foreground="black")] if sel else [])
 
     # ---------- selection ----------
-    def select(self, cid: int | None):
+    def select(self, cid: int | None, focus: bool = False):
+        """Select a colony; ``focus`` also centres the plate view on it (from the lists and the graph)."""
         self.selected = cid
-        if cid is not None and self.plate.area[self.k, cid] == 0:
-            pass  # keep the frame; the ring is drawn at the colony's last position
+        if focus and cid is not None:
+            self.focus_on(cid)
         self.draw_ring()
         self.highlight_line()
         self.show_info()
         self.canvas.draw_idle()
         self.canvas_graph.draw_idle()
+
+    FOCUS_MIN = 110  # px: half width of the focused view at least ...
+    FOCUS_RADII = 7  # ... or this many colony radii
+
+    def focus_on(self, cid: int):
+        """Centre the plate image on the colony, zoomed so that it and its neighbours are visible
+        (half width max(FOCUS_MIN px, FOCUS_RADII x its radius in the last frame it was seen))."""
+        p = self.plate
+        present = np.nonzero(p.area[:, cid])[0]
+        if not len(present):
+            return
+        k = self.k if p.area[self.k, cid] > 0 else int(present[-1])
+        r = np.sqrt(p.area[int(present[-1]), cid] / np.pi)
+        half = max(self.FOCUS_MIN, self.FOCUS_RADII * r)
+        size = p.mask.shape[0]
+        half = min(half, size / 2)
+        cx = float(np.clip(p.cx[k, cid], half - 0.5, size - half - 0.5))
+        cy = float(np.clip(p.cy[k, cid], half - 0.5, size - half - 0.5))
+        if not self.toolbar._nav_stack():  # so the toolbar's Home button returns to the full plate
+            self.toolbar.push_current()
+        self.ax_img.set_xlim(cx - half, cx + half)
+        self.ax_img.set_ylim(cy + half, cy - half)  # image rows grow downwards
+
+    def full_view(self):
+        size = self.plate.mask.shape
+        self.ax_img.set_xlim(-0.5, size[1] - 0.5)
+        self.ax_img.set_ylim(size[0] - 0.5, -0.5)
+        self.canvas.draw_idle()
 
     def on_click(self, event):
         if self.toolbar.mode or event.inaxes is not self.ax_img or event.xdata is None:
@@ -673,7 +731,7 @@ class ReviewWindow(QtWidgets.QMainWindow):
     def on_pick(self, event):
         cid = getattr(event.artist, "colony_id", None)
         if cid is not None and event.mouseevent.button == 1:
-            self.select(cid)
+            self.select(cid, focus=True)
 
     def find_colony(self):
         try:
@@ -681,7 +739,7 @@ class ReviewWindow(QtWidgets.QMainWindow):
         except ValueError:
             return
         if 1 <= cid <= self.plate.n:
-            self.select(cid)
+            self.select(cid, focus=True)
         else:
             self.status.showMessage(f"no colony {cid} on this plate", 4000)
 
@@ -699,25 +757,24 @@ class ReviewWindow(QtWidgets.QMainWindow):
         flags = p.flags(c)
         if not flags:
             flags_html = "<br>No flags."
-        elif p.resolved(c):
-            flags_html = f"<br><span style='color:#2e7d32'><b>Flags (resolved):</b> {flags}</span>"
+        elif p.reviewed(c):
+            flags_html = f"<br><b>Flags (reviewed):</b> {flags}"
         else:
             flags_html = f"<br><span style='color:{FLAG_COLOR}'><b>Flags:</b> {flags}</span>"
         self.info_label.setText(
             f"<b>Colony {c}</b> &mdash; {ColonyStatus(s).name.replace('_', ' ').lower()}"
             f" (detected as {ColonyStatus(int(p.colonies.auto_status.iat[c - 1])).name.replace('_', ' ').lower()})<br>"
             f"Appears at {appear}, final area {int(a[-1])} px, {merged_txt}.{flags_html}<br><br>"
-            "<i>Ctrl+E exclude, Ctrl+I include, Ctrl+O resolve flags</i>")
+            "<i>Ctrl+E exclude, Ctrl+I include, Ctrl+U unreview, Esc full plate</i>")
 
     def set_selected(self, status: int):
         c = self.selected
         if c is None:
             self.status.showMessage("select a colony first", 3000)
             return
-        if self.plate.set_status(c, status):
+        if self.plate.decide([c], status, "include" if status == VALID else "exclude"):
             self.status.showMessage(f"colony {c}: {ColonyStatus(status).name.lower()} (saved)", 4000)
-            self.fill_flag_list()
-            self.redraw_all()
+            self._after_decision()
 
     def _confirm(self, title: str, text: str) -> bool:
         ans = QtWidgets.QMessageBox.question(self, title, text, QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
@@ -739,25 +796,25 @@ class ReviewWindow(QtWidgets.QMainWindow):
                                         "and return to the statuses from detection?"):
             self._after_bulk(f"{self.plate.reset()} colonies reset to their detected status (saved)")
 
-    # ---------- flagged list ----------
+    # ---------- flagged lists ----------
     ALL_FLAGS = "All flags"
+    COLORS = {VALID: "#2e7d32", EXCLUDED: "#c62828"}
 
     @staticmethod
     def flag_kinds(flags: str) -> list[str]:
         """'gap (3 frames); jump x2.1' -> ['gap', 'jump']: the flag names without their numbers."""
         return kinds_of(flags)
 
-    def flagged_ids(self) -> list[int]:
+    def flagged_ids(self, reviewed: bool) -> list[int]:
+        """Flagged colonies (included or excluded by the reviewer; not the automatic border / zero-area
+        statuses) still to review, or reviewed; filtered by the flag-kind box."""
         col = self.plate.colonies
         f = col[(col.n_flags > 0) & ((col.status == VALID) | (col.status == EXCLUDED))]
         kind = self.flag_kind.currentText()
         if kind and kind != self.ALL_FLAGS:
             f = f[[kind in self.flag_kinds(x) for x in f["flags"]]]
-        f = f.assign(resolved=[self.plate.resolved(int(c)) for c in f.colony_id])
-        if self.hide_resolved.isChecked():
-            f = f[~f.resolved]
-        # open flags of included colonies first, then resolved ones, then excluded colonies
-        return f.sort_values(["status", "resolved", "n_flags"], ascending=[True, True, False]).colony_id.tolist()
+        f = f[[self.plate.reviewed(int(c)) == reviewed for c in f.colony_id]]
+        return f.sort_values(["status", "n_flags", "colony_id"], ascending=[True, False, True]).colony_id.tolist()
 
     def fill_flag_kinds(self):
         """The flag kinds on this plate, with their counts; keeps the chosen kind if it is still there."""
@@ -775,97 +832,94 @@ class ReviewWindow(QtWidgets.QMainWindow):
         self.flag_kind.blockSignals(False)
 
     def fill_flag_list(self, *_):
-        self.flag_list.blockSignals(True)
-        self.flag_list.clear()
-        self._flag_ids = self.flagged_ids()
-        for c in self._flag_ids:
-            s, done = self.plate.status(c), self.plate.resolved(c)
-            item = QtWidgets.QListWidgetItem(f"#{c}  {'included' if s == VALID else 'excluded'}  {self.plate.flags(c)}")
-            item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.Checked if done else QtCore.Qt.Unchecked)
-            item.setToolTip("ticked: flags resolved (checked, colony is fine)")
-            item.setForeground(QtGui.QColor("#2e7d32" if done else "#b35900" if s == VALID else "#888888"))
-            self.flag_list.addItem(item)
-        self.flag_list.blockSignals(False)
-        col = self.plate.colonies
-        flagged = [int(c) for c in col.colony_id[(col.n_flags > 0) & (col.status == VALID)]]
-        n_open = sum(self.plate.open_flags(c) for c in flagged)
-        self.flag_count.setText(f"{n_open} of {len(flagged)} flagged included colonies unresolved")
+        """Fill both lists, keeping the selected colony selected in the list it is now in."""
+        for key, reviewed in (("todo", False), ("done", True)):
+            lw = self.lists[key]
+            lw.blockSignals(True)
+            lw.clear()
+            self._ids[key] = self.flagged_ids(reviewed)
+            for c in self._ids[key]:
+                s = self.plate.status(c)
+                item = QtWidgets.QListWidgetItem(f"#{c}  {'included' if s == VALID else 'excluded'}  {self.plate.flags(c)}")
+                item.setForeground(QtGui.QColor(self.COLORS.get(s, "#888888")))
+                lw.addItem(item)
+            if self.selected in self._ids[key]:
+                lw.setCurrentRow(self._ids[key].index(self.selected))
+            lw.blockSignals(False)
+        self.list_labels["todo"].setText(f"<b>To review</b> ({len(self._ids['todo'])})")
+        self.list_labels["done"].setText(f"<b>Reviewed</b> ({len(self._ids['done'])})")
 
-    def flag_item_checked(self, item: QtWidgets.QListWidgetItem):
-        row = self.flag_list.row(item)
-        if not 0 <= row < len(self._flag_ids):
-            return
-        c, on = self._flag_ids[row], item.checkState() == QtCore.Qt.Checked
-        if self.plate.set_resolved([c], on):
-            self.status.showMessage(f"colony {c}: flags {'resolved' if on else 'unresolved'} (saved)", 4000)
-            self._refresh_after_resolve()
+    @property
+    def _flag_ids(self) -> list[int]:
+        """Both lists' colonies (the graph's "Flagged only")."""
+        return self._ids["todo"] + self._ids["done"]
 
-    def toggle_resolved(self):
-        """Ctrl+O: resolve the flags of the colonies selected in the list (else the selected colony), or
-        unresolve them if they all are resolved already."""
-        rows = sorted(i.row() for i in self.flag_list.selectedIndexes())
-        ids = [self._flag_ids[r] for r in rows if r < len(self._flag_ids)] or (
-            [self.selected] if self.selected is not None else [])
-        ids = [c for c in ids if self.plate.flags(c)]
+    def selected_in(self, key: str) -> list[int]:
+        return [self._ids[key][i.row()] for i in self.lists[key].selectedIndexes() if i.row() < len(self._ids[key])]
+
+    def list_selection_changed(self, key: str):
+        other = self.lists["done" if key == "todo" else "todo"]
+        if self.lists[key].selectedItems() and other.selectedItems():
+            other.blockSignals(True)
+            other.clearSelection()
+            other.blockSignals(False)
+        row = self.lists[key].currentRow()
+        if self.lists[key].selectedItems() and 0 <= row < len(self._ids[key]):
+            self.select(self._ids[key][row], focus=True)
+
+    def _after_decision(self):
+        """Lists, plate and graph again after a decision; done on the next event-loop turn, because it
+        rebuilds the list whose signal may have started it."""
+        QtCore.QTimer.singleShot(0, lambda: (self.fill_flag_list(), self.redraw_all()))
+
+    def decide_selected(self, key: str, status: int):
+        ids = self.selected_in(key)
         if not ids:
-            self.status.showMessage("select a flagged colony first", 3000)
+            self.status.showMessage("select colonies in the list first", 3000)
             return
-        on = not all(self.plate.resolved(c) for c in ids)
-        n = self.plate.set_resolved(ids, on)
-        self.status.showMessage(f"{n} colonies: flags {'resolved' if on else 'unresolved'} (saved)", 4000)
-        self._refresh_after_resolve()
+        word = "include" if status == VALID else "exclude"
+        n = self.plate.decide(ids, status, f"{word} selected")
+        self.status.showMessage(f"{n} colonies {word}d and reviewed (saved)", 4000)
+        self._after_decision()
 
-    def _refresh_after_resolve(self):
-        keep = self.selected
-        QtCore.QTimer.singleShot(0, lambda: (self.fill_flag_list(), self._reselect(keep), self.redraw_all()))
+    def exclude_all_to_review(self):
+        ids = list(self._ids["todo"])
+        if not ids:
+            self.status.showMessage("nothing left to review in this list", 3000)
+            return
+        kind = self.flag_kind.currentText()
+        if self._confirm("Exclude flagged", f"Exclude all {len(ids)} colonies still to review ({kind.lower()})?"):
+            n = self.plate.decide(ids, EXCLUDED, f"exclude flagged: {kind}")
+            self._after_bulk(f"{n} flagged colonies excluded and reviewed (saved)")
 
-    def _reselect(self, cid):
-        if cid in self._flag_ids:
-            self.flag_list.blockSignals(True)
-            self.flag_list.setCurrentRow(self._flag_ids.index(cid))
-            self.flag_list.blockSignals(False)
+    def unreview_selected(self):
+        """Ctrl+U: the colonies selected in "Reviewed" (else the selected colony) back to "To review"."""
+        ids = self.selected_in("done") or ([self.selected] if self.selected is not None else [])
+        ids = [c for c in ids if self.plate.reviewed(c)]
+        if not ids:
+            self.status.showMessage("select a reviewed colony first", 3000)
+            return
+        n = self.plate.unreview(ids)
+        self.status.showMessage(f"{n} colonies back to review (saved)", 4000)
+        self._after_decision()
 
     def change_flag_kind(self, _=None):
         self.fill_flag_list()
         if self.checks["Flagged only"].isChecked():
             self.draw_graph()
 
-    def _exclude_flagged(self, ids: list[int], what: str):
-        ids = [c for c in ids if self.plate.status(c) == VALID]
-        if not ids:
-            self.status.showMessage(f"no included colonies {what}", 3000)
-            return
-        kind = self.flag_kind.currentText()
-        if self._confirm("Exclude flagged", f"Exclude {len(ids)} included colonies {what} ({kind.lower()})?"):
-            n = self.plate.exclude(ids, f"exclude flagged: {kind}")
-            self._after_bulk(f"{n} flagged colonies excluded (saved)")
-
-    def exclude_selected_flagged(self):
-        rows = sorted(i.row() for i in self.flag_list.selectedIndexes())
-        self._exclude_flagged([self._flag_ids[r] for r in rows], "selected in the list")
-
-    def exclude_listed_flagged(self):
-        self._exclude_flagged(list(self._flag_ids), "in the list")
-
-    def flag_row_selected(self, row: int):
-        if 0 <= row < len(self._flag_ids):
-            self.select(self._flag_ids[row])
-
     def step_flag(self, d: int):
-        """F / Shift+F: the next / previous included colony in the list with unresolved flags (any listed
-        colony if there is none left)."""
-        if not self._flag_ids:
+        """F / Shift+F: the next / previous colony in "To review"."""
+        ids = self._ids["todo"]
+        if not ids:
             return
-        stops = [i for i, c in enumerate(self._flag_ids)  # excluded colonies are settled already
-                 if self.plate.open_flags(c) and self.plate.status(c) == VALID] or list(range(len(self._flag_ids)))
-        if self.selected in self._flag_ids:
-            here = self._flag_ids.index(self.selected)
-            ahead = [i for i in stops if (i > here if d > 0 else i < here)]
-            i = (ahead[0] if d > 0 else ahead[-1]) if ahead else (stops[0] if d > 0 else stops[-1])
+        if self.selected in ids:
+            i = (ids.index(self.selected) + d) % len(ids)
         else:
-            i = stops[0] if d > 0 else stops[-1]
-        self.flag_list.setCurrentRow(i)
+            i = 0 if d > 0 else len(ids) - 1
+        lw = self.lists["todo"]
+        lw.clearSelection()
+        lw.setCurrentRow(i)
 
     # ---------- finish ----------
     def finish(self):

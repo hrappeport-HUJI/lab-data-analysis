@@ -2,13 +2,14 @@
 
     python scripts/export_review_tiles.py <results folder> [--out DIR] [--per-plate 20]
                                           [--categories excluded,doublet,split,fragment,track]
-                                          [--include-unreviewed]
+                                          [--unreviewed] [--include-unreviewed]
 
-Run it after the colony review. Per reviewed plate it writes 256 px tiles around colonies you
-excluded by hand ("excluded") and around included colonies whose segmentation flags you left
-unresolved: possible doublets ("doublet"), irregular splits ("split"), pieces split off a neighbour
-("fragment"), jumps and flicker ("track"). A resolved flag means the colony was fine and gives no
-tile (scanlag/train/review_tiles.py).
+Run it after the colony review. Per reviewed plate it writes a 256 px tile around every colony you
+excluded by hand, in the category of its flags: possible doublets ("doublet"), irregular splits
+("split"), pieces split off a neighbour ("fragment"), jumps and flicker ("track"), or none of these
+("excluded": debris, writing, specks). Colonies you included were fine and give no tile.
+--unreviewed adds included colonies with segmentation flags you didn't review
+(scanlag/train/review_tiles.py).
 
 The tiles go to <results>/training_tiles/ (or --out) in the layout of the MATLAB gold set, so
     python scripts/annotate_tiles.py --testset <results>/training_tiles
@@ -38,8 +39,10 @@ def main() -> None:
     parser.add_argument("--per-plate", type=int, default=20, help="tiles per plate at most (default 20)")
     parser.add_argument("--categories", default=",".join(CATEGORIES),
                         help=f"comma-separated, from {', '.join(CATEGORIES)} (default all)")
+    parser.add_argument("--unreviewed", action="store_true",
+                        help="also included colonies with segmentation flags not reviewed yet")
     parser.add_argument("--include-unreviewed", action="store_true",
-                        help="also plates never opened in the review window (their flags are all unresolved)")
+                        help="also plates never opened in the review window (implies --unreviewed there)")
     args = parser.parse_args(split_prompt_args(sys.argv[1:]))
 
     results = args.results.resolve()
@@ -58,7 +61,7 @@ def main() -> None:
         if not visited and not args.include_unreviewed:
             skipped.append(f"{d.parent.name}/{d.name}")
             continue
-        for tile in plate_review_tiles(d, categories, args.per_plate):
+        for tile in plate_review_tiles(d, categories, args.per_plate, unreviewed=args.unreviewed or not visited):
             name = f"tile_{tile.scanner}_p{tile.plate}_c{tile.colony_id}_{tile.category}"
             if (store.root / "manual" / name).exists():
                 counts["kept"] += 1

@@ -444,7 +444,7 @@ def track_tables(tracker, times: np.ndarray, mask: np.ndarray, labels, own=None)
         "seed_y": [r for r, _ in seeds],
     })
     flags = colony_flags(area, merged, blob, labels, own, times_min=times, bad=bad)
-    colonies = colonies.join(flags.set_index("colony_id"), on="colony_id").assign(flags_resolved="")
+    colonies = colonies.join(flags.set_index("colony_id"), on="colony_id").assign(flags_reviewed="")
     return tracks, colonies
 
 
