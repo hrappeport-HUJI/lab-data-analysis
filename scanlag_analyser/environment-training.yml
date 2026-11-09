@@ -1,0 +1,23 @@
+# Add-on to environment.yml / environment-cpu.yml for training and evaluating models and running
+# the tests: Cellpose-SAM (train_cellpose.py, the cellpose detector, evaluate_goldset.py) and pytest.
+# U-Net training (train_unet.py) and annotate_tiles.py already work in the user environment.
+#
+#     conda env update -n scanlag -f environment-training.yml
+#
+# Training on the CPU works but is very slow; use a machine with an NVIDIA GPU.
+#
+# Cellpose comes from pip: conda-forge's cellpose package includes the Cellpose GUI, which brings
+# PySide6 (a second Qt next to the review window's PyQt5) and a second OpenCV next to
+# opencv-python-headless. Its other dependencies come from conda-forge; segment-anything from pip.
+name: scanlag
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - natsort
+  - roifile
+  - fill-voids
+  - pytest
+  - pip
+  - pip:
+      - cellpose>=4
