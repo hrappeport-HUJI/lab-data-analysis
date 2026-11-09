@@ -11,15 +11,15 @@ two lists. "To review" starts with every flagged colony; marked on the plate wit
 (Ctrl+I) or exclude (Ctrl+E) a colony and it moves to "Reviewed". In both lists green means included and
 red excluded. "Unreview" (Ctrl+U) moves the selected reviewed colonies back to "To review", keeping their
 status, to think about them again. F / Shift+F step through "To review". The box above the lists shows
-one kind of flag only (e.g. "large at appearance", pieces split off a neighbour); "Include selected" /
-"Exclude selected" decide the colonies selected in a list (Ctrl/Shift+click for several), "Exclude all to
-review" every listed colony still to review. Reviewed flag kinds are saved in colonies.parquet's
+one kind of flag only (e.g. "large at appearance", pieces split off a neighbour); "Include" /
+"Exclude" under a list decide the colonies selected in it (Ctrl/Shift+click for several), "Exclude
+listed" every colony "To review" shows. Reviewed flag kinds are saved in colonies.parquet's
 ``flags_reviewed`` (scanlag.pipeline.flags, Reviewing) and logged in review.json.
 
 Clicking a colony in a list or its curve in the graph centres the plate image on it, zoomed in with its
 neighbourhood still visible; Esc (or "Full plate") shows the whole plate again. Clicking on the plate
-selects without moving the view. The selected colony is marked by two rings: a cyan one around it and
-a wide yellow one, to find it quickly on a crowded plate.
+selects without moving the view. The selected colony is marked by a wide yellow ring, to find it quickly
+on a crowded plate.
 
 With the footprint tracker (the default), merged colonies keep their own colour and the line
 where their blob was split is drawn in white ("Labels only") or as outlines. With the seed tracker,
@@ -281,16 +281,34 @@ class ReviewWindow(QtWidgets.QMainWindow):
         self.texts = []
         self.ring = []
         self.setWindowTitle("ScanLag colony review")
-        self.resize(1500, 900)
         self._build()
+        self.fit_to_screen()
         self.load_plate(0)
 
     # ---------- layout ----------
+    def fit_to_screen(self):
+        """Open at most 1500 x 950 px, and never larger than the screen's free area (menu bar and Dock
+        excluded)."""
+        screen = QtWidgets.QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1500, 950)
+        w, h = min(1500, int(avail.width() * 0.96)), min(950, int(avail.height() * 0.94))
+        self.resize(w, h)
+        self.move(avail.x() + (avail.width() - w) // 2, avail.y() + (avail.height() - h) // 2)
+        self.split_evenly()
+
+    def split_evenly(self):
+        """Image : graph : lists about 40 : 36 : 24 of the window's width (the lists at least 300 px)."""
+        w = self.width()
+        side = max(300, int(w * 0.24))
+        rest = max(w - side - 30, 450)
+        self.splitter.setSizes([int(rest * 0.53), int(rest * 0.47), side])
+
     def _build(self):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
 
+        # Two rows of controls, so the window fits a laptop screen (about 1,300 px wide)
         bar = QtWidgets.QHBoxLayout()
         self.plate_box = QtWidgets.QComboBox()
         for d in self.plate_dirs:
@@ -303,22 +321,30 @@ class ReviewWindow(QtWidgets.QMainWindow):
             b.setFixedWidth(32)
             b.clicked.connect(slot)
             bar.addWidget(b)
-        bar.addSpacing(20)
-        bar.addWidget(QtWidgets.QLabel("Find colony no."))
+        bar.addSpacing(12)
+        bar.addWidget(QtWidgets.QLabel("Find colony"))
         self.find_edit = QtWidgets.QLineEdit()
-        self.find_edit.setFixedWidth(60)
+        self.find_edit.setFixedWidth(55)
         self.find_edit.returnPressed.connect(self.find_colony)
         bar.addWidget(self.find_edit)
-        bar.addSpacing(20)
-        for text, slot in (("Exclude (Ctrl+E)", lambda: self.set_selected(EXCLUDED)),
-                           ("Include (Ctrl+I)", lambda: self.set_selected(VALID)),
-                           ("Unreview (Ctrl+U)", self.unreview_selected), ("Reset plate", self.reset_plate),
-                           ("Full plate (Esc)", self.full_view),
-                           ("◀ flagged", lambda: self.step_flag(-1)), ("flagged ▶ (F)", lambda: self.step_flag(1))):
+        bar.addSpacing(12)
+        for text, slot, tip in (("Exclude", lambda: self.set_selected(EXCLUDED), "Exclude the selected colony (Ctrl+E)"),
+                                ("Include", lambda: self.set_selected(VALID), "Include the selected colony (Ctrl+I)"),
+                                ("Unreview", self.unreview_selected, "Back to To review (Ctrl+U)"),
+                                ("◀ flagged", lambda: self.step_flag(-1), "Previous colony to review (Shift+F)"),
+                                ("flagged ▶", lambda: self.step_flag(1), "Next colony to review (F)")):
             b = QtWidgets.QPushButton(text)
+            b.setToolTip(tip)
             b.clicked.connect(slot)
             bar.addWidget(b)
         bar.addStretch(1)
+        finish = QtWidgets.QPushButton("Finish && export")
+        finish.setStyleSheet("font-weight: bold")
+        finish.clicked.connect(self.finish)
+        bar.addWidget(finish)
+        root.addLayout(bar)
+
+        checks_row = QtWidgets.QHBoxLayout()
         self.checks = {}
         for name, default in (("Outlines", True), ("Numbers", True), ("Labels only", False),
                               ("Show excluded", True), ("Flagged only", False), ("Log scale", True)):
@@ -326,35 +352,92 @@ class ReviewWindow(QtWidgets.QMainWindow):
             cb.setChecked(default)
             cb.toggled.connect(self.redraw_all)
             self.checks[name] = cb
-            bar.addWidget(cb)
-        finish = QtWidgets.QPushButton("Finish && export")
-        finish.setStyleSheet("font-weight: bold")
-        finish.clicked.connect(self.finish)
-        bar.addWidget(finish)
-        root.addLayout(bar)
+            checks_row.addWidget(cb)
+        checks_row.addStretch(1)
+        for text, slot, tip in (("Full plate", self.full_view, "Show the whole plate (Esc)"),
+                                ("Reset plate", self.reset_plate, "Undo all changes on this plate")):
+            b = QtWidgets.QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            checks_row.addWidget(b)
+        root.addLayout(checks_row)
 
-        body = QtWidgets.QHBoxLayout()
-        left = QtWidgets.QVBoxLayout()
         # Separate canvases: moving in time redraws only the plate; the graph (up to ~1,000 curves,
-        # 0.25 s to draw) only gets its time marker blitted.
-        self.fig_img = Figure(figsize=(7, 7), layout="constrained")
+        # 0.25 s to draw) only gets its time marker blitted. Image, graph and lists sit in a splitter:
+        # drag the dividers to give one more room.
+        self.fig_img = Figure(figsize=(5, 5), layout="constrained")
         self.ax_img = self.fig_img.add_subplot()
         self.canvas = FigureCanvasQTAgg(self.fig_img)
-        self.fig_graph = Figure(figsize=(7, 7), layout="constrained")
+        self.fig_graph = Figure(figsize=(5, 5), layout="constrained")
         self.ax_graph = self.fig_graph.add_subplot()
         self.canvas_graph = FigureCanvasQTAgg(self.fig_graph)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.toolbar_graph = NavigationToolbar2QT(self.canvas_graph, self)
-        bars = QtWidgets.QHBoxLayout()
-        bars.addWidget(self.toolbar)
-        bars.addWidget(self.toolbar_graph)
-        canvases = QtWidgets.QHBoxLayout()
-        canvases.addWidget(self.canvas, 1)
-        canvases.addWidget(self.canvas_graph, 1)
-        left.addLayout(bars)
-        left.addLayout(canvases, 1)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        for toolbar, canvas in ((self.toolbar, self.canvas), (self.toolbar_graph, self.canvas_graph)):
+            canvas.setMinimumSize(220, 220)
+            canvas.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            toolbar.setMinimumWidth(0)
+            panel = QtWidgets.QWidget()
+            col = QtWidgets.QVBoxLayout(panel)
+            col.setContentsMargins(0, 0, 0, 0)
+            col.addWidget(toolbar)
+            col.addWidget(canvas, 1)
+            splitter.addWidget(panel)
         self._graph_bg = None
         self.canvas_graph.mpl_connect("draw_event", self.on_graph_draw)
+
+        side_panel = QtWidgets.QWidget()
+        side = QtWidgets.QVBoxLayout(side_panel)
+        side.setContentsMargins(4, 0, 0, 0)
+        self.flag_kind = QtWidgets.QComboBox()
+        self.flag_kind.currentIndexChanged.connect(self.change_flag_kind)
+        legend = QtWidgets.QLabel("<b>Flagged colonies</b> &nbsp; <span style='color:#2e7d32'>green: included</span>, "
+                                  "<span style='color:#c62828'>red: excluded</span>")
+        legend.setWordWrap(True)
+        side.addWidget(legend)
+        side.addWidget(self.flag_kind)
+        self.lists, self.list_labels, self._ids = {}, {}, {"todo": [], "done": []}
+        for key in ("todo", "done"):
+            self.list_labels[key] = QtWidgets.QLabel()
+            side.addWidget(self.list_labels[key])
+            lw = QtWidgets.QListWidget()
+            lw.setMinimumWidth(200)
+            lw.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+            lw.itemSelectionChanged.connect(lambda *_, key=key: self.list_selection_changed(key))
+            self.lists[key] = lw
+            side.addWidget(lw, 3 if key == "todo" else 2)
+            row = QtWidgets.QHBoxLayout()
+            # *_ swallows the "checked" argument of clicked(), which would otherwise land in key
+            buttons = (("Include", lambda *_, key=key: self.decide_selected(key, VALID),
+                        "Include the colonies selected in this list"),
+                       ("Exclude", lambda *_, key=key: self.decide_selected(key, EXCLUDED),
+                        "Exclude the colonies selected in this list"))
+            buttons += ((("Exclude listed", self.exclude_all_to_review, "Exclude every colony this list shows (asks first)"),)
+                        if key == "todo" else
+                        (("Unreview", self.unreview_selected, "Move the selected colonies back to To review"),))
+            for text, slot, tip in buttons:
+                b = QtWidgets.QPushButton(text)
+                b.setObjectName(f"{key} {text.lower()}")  # e.g. "todo include", "done unreview"
+                b.setToolTip(tip)
+                b.clicked.connect(slot)
+                row.addWidget(b)
+            side.addLayout(row)
+        self.info_label = QtWidgets.QLabel()
+        self.info_label.setWordWrap(True)
+        self.info_label.setTextFormat(QtCore.Qt.RichText)
+        self.info_label.setMinimumHeight(120)
+        self.info_label.setAlignment(QtCore.Qt.AlignTop)
+        side.addWidget(self.info_label)
+        side_panel.setMinimumWidth(270)
+        splitter.addWidget(side_panel)
+        self.splitter = splitter
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 4)
+        splitter.setStretchFactor(2, 2)
+        root.addWidget(splitter, 1)
+
         slider_row = QtWidgets.QHBoxLayout()
         self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         # Continuous: every move asks for a frame, a zero-delay timer renders only the latest one,
@@ -364,10 +447,10 @@ class ReviewWindow(QtWidgets.QMainWindow):
         self._frame_timer = QtCore.QTimer(self, singleShot=True, interval=0)
         self._frame_timer.timeout.connect(lambda: self.set_frame(self._pending_frame))
         self.time_label = QtWidgets.QLabel()
-        self.time_label.setMinimumWidth(220)
+        self.time_label.setMinimumWidth(190)
         slider_row.addWidget(self.slider, 1)
         slider_row.addWidget(self.time_label)
-        left.addLayout(slider_row)
+        root.addLayout(slider_row)
 
         view_row = QtWidgets.QHBoxLayout()
         view_row.addWidget(QtWidgets.QLabel("Image:"))
@@ -375,61 +458,25 @@ class ReviewWindow(QtWidgets.QMainWindow):
         self.layer_box.addItems(["Raw", "Difference (frame - background)"])
         self.layer_box.currentIndexChanged.connect(self.change_layer)
         view_row.addWidget(self.layer_box)
-        view_row.addSpacing(15)
+        view_row.addSpacing(12)
         self.level_sliders = {}
         for name in ("Black", "White"):
             view_row.addWidget(QtWidgets.QLabel(name))
             sl = QtWidgets.QSlider(QtCore.Qt.Horizontal)
             sl.setRange(0, 255)
-            sl.setFixedWidth(180)
+            sl.setMinimumWidth(60)
+            sl.setMaximumWidth(180)
             sl.valueChanged.connect(self.change_levels)
             self.level_sliders[name] = sl
-            view_row.addWidget(sl)
+            view_row.addWidget(sl, 1)
         self.level_label = QtWidgets.QLabel()
-        self.level_label.setMinimumWidth(70)
+        self.level_label.setMinimumWidth(60)
         view_row.addWidget(self.level_label)
         auto = QtWidgets.QPushButton("Auto contrast")
         auto.clicked.connect(lambda: self.auto_levels(redraw=True))
         view_row.addWidget(auto)
         view_row.addStretch(1)
-        left.addLayout(view_row)
-        body.addLayout(left, 1)
-
-        side = QtWidgets.QVBoxLayout()
-        self.flag_kind = QtWidgets.QComboBox()
-        self.flag_kind.currentIndexChanged.connect(self.change_flag_kind)
-        side.addWidget(QtWidgets.QLabel("<b>Flagged colonies</b> &nbsp; "
-                                        "<span style='color:#2e7d32'>green: included</span>, "
-                                        "<span style='color:#c62828'>red: excluded</span>"))
-        side.addWidget(self.flag_kind)
-        self.lists, self.list_labels, self._ids = {}, {}, {"todo": [], "done": []}
-        for key in ("todo", "done"):
-            self.list_labels[key] = QtWidgets.QLabel()
-            side.addWidget(self.list_labels[key])
-            lw = QtWidgets.QListWidget()
-            lw.setMinimumWidth(330)
-            lw.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-            lw.itemSelectionChanged.connect(lambda key=key: self.list_selection_changed(key))
-            self.lists[key] = lw
-            side.addWidget(lw, 3 if key == "todo" else 2)
-            row = QtWidgets.QHBoxLayout()
-            buttons = (("Include selected", lambda key=key: self.decide_selected(key, VALID)),
-                       ("Exclude selected", lambda key=key: self.decide_selected(key, EXCLUDED)))
-            buttons += ((("Exclude all to review", self.exclude_all_to_review),) if key == "todo" else
-                        (("Unreview selected", self.unreview_selected),))
-            for text, slot in buttons:
-                b = QtWidgets.QPushButton(text)
-                b.clicked.connect(slot)
-                row.addWidget(b)
-            side.addLayout(row)
-        self.info_label = QtWidgets.QLabel()
-        self.info_label.setWordWrap(True)
-        self.info_label.setTextFormat(QtCore.Qt.RichText)
-        self.info_label.setMinimumHeight(170)
-        self.info_label.setAlignment(QtCore.Qt.AlignTop)
-        side.addWidget(self.info_label)
-        body.addLayout(side)
-        root.addLayout(body, 1)
+        root.addLayout(view_row)
         self.status = self.statusBar()
 
         self.canvas.mpl_connect("button_press_event", self.on_click)
@@ -612,8 +659,8 @@ class ReviewWindow(QtWidgets.QMainWindow):
         self.show_time(k)
 
     def draw_ring(self):
-        """Two rings around the selected colony: a cyan one close around it, and a wide yellow one
-        (with a dark edge, visible on any background) so the eye finds it on a crowded plate."""
+        """A wide yellow ring (with a dark edge, visible on any background) around the selected colony,
+        leaving the colony's own outline visible, so the eye finds it on a crowded plate."""
         for ring in self.ring:
             ring.remove()
         self.ring = []
@@ -626,9 +673,9 @@ class ReviewWindow(QtWidgets.QMainWindow):
         k = self.k if self.plate.area[self.k, c] > 0 else int(present[-1])
         r = max(np.sqrt(self.plate.area[k, c] / np.pi) + 6, 10)
         xy = (self.plate.cx[k, c], self.plate.cy[k, c])
-        outer = matplotlib.patches.Circle(xy, 2.2 * r + 25, fill=False, ec="yellow", lw=2.5)
-        outer.set_path_effects([patheffects.withStroke(linewidth=4.5, foreground="black")])
-        self.ring = [matplotlib.patches.Circle(xy, r, fill=False, ec="cyan", lw=1.8), outer]
+        ring = matplotlib.patches.Circle(xy, 2.2 * r + 25, fill=False, ec="yellow", lw=2.5)
+        ring.set_path_effects([patheffects.withStroke(linewidth=4.5, foreground="black")])
+        self.ring = [ring]
         for ring in self.ring:
             self.ax_img.add_patch(ring)
 
@@ -812,8 +859,9 @@ class ReviewWindow(QtWidgets.QMainWindow):
         f = col[(col.n_flags > 0) & ((col.status == VALID) | (col.status == EXCLUDED))]
         kind = self.flag_kind.currentText()
         if kind and kind != self.ALL_FLAGS:
-            f = f[[kind in self.flag_kinds(x) for x in f["flags"]]]
-        f = f[[self.plate.reviewed(int(c)) == reviewed for c in f.colony_id]]
+            f = f[np.array([kind in self.flag_kinds(x) for x in f["flags"]], bool)]
+        # a numpy mask, not a list: an empty list would select no *columns* (KeyError: 'status' below)
+        f = f[np.array([self.plate.reviewed(int(c)) == reviewed for c in f.colony_id], bool)]
         return f.sort_values(["status", "n_flags", "colony_id"], ascending=[True, False, True]).colony_id.tolist()
 
     def fill_flag_kinds(self):
@@ -842,6 +890,7 @@ class ReviewWindow(QtWidgets.QMainWindow):
                 s = self.plate.status(c)
                 item = QtWidgets.QListWidgetItem(f"#{c}  {'included' if s == VALID else 'excluded'}  {self.plate.flags(c)}")
                 item.setForeground(QtGui.QColor(self.COLORS.get(s, "#888888")))
+                item.setToolTip(item.text())  # long flag lists don't fit the panel
                 lw.addItem(item)
             if self.selected in self._ids[key]:
                 lw.setCurrentRow(self._ids[key].index(self.selected))
@@ -943,5 +992,20 @@ def _visited(plate_dir: Path) -> bool:
 def run_review(plate_dirs: list[Path], on_finish=None) -> None:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     win = ReviewWindow(plate_dirs, on_finish)
+
+    def report(kind, value, tb):
+        """An error in a button or key handler: show it and keep the window open (PyQt5 would abort the
+        whole program). Decisions are saved as they are made, so nothing is lost either way."""
+        import traceback
+
+        text = "".join(traceback.format_exception(kind, value, tb))
+        print(text, file=sys.stderr, flush=True)
+        QtWidgets.QMessageBox.warning(win, "Error", f"{kind.__name__}: {value}\n\nThe window stays open; the full "
+                                      "error is in the terminal. Please report it.")
+
+    sys.excepthook = report
     win.show()
-    app.exec_()
+    try:
+        app.exec_()
+    finally:
+        sys.excepthook = sys.__excepthook__

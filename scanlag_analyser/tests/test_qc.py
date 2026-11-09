@@ -182,13 +182,16 @@ def test_review_window_lists_and_focus(tmp_path, monkeypatch):
             app.processEvents()
 
     w = ReviewWindow([plate])
+    button = {b.objectName(): b for b in w.findChildren(QtWidgets.QPushButton) if b.objectName()}
+    assert {"todo include", "todo exclude", "todo exclude listed", "done include", "done exclude",
+            "done unreview"} <= set(button)
     assert w.checks["Show excluded"].isChecked()
     assert "Exclude all" not in [b.text() for b in w.findChildren(QtWidgets.QPushButton)]
     assert w._ids == {"todo": [1, 3], "done": []}
     w.FOCUS_MIN, w.FOCUS_RADII = 30, 2  # the test plate is only 200 px wide
     w.lists["todo"].setCurrentRow(0)
     pump()
-    assert w.selected == 1 and len(w.ring) == 2
+    assert w.selected == 1 and len(w.ring) == 1
     x0, x1 = w.ax_img.get_xlim()
     assert x1 - x0 < 150 and x0 < 100 < x1  # zoomed onto colony 1, centred at (100, 100)
     w.set_selected(EXCLUDED)  # Ctrl+E
@@ -196,13 +199,13 @@ def test_review_window_lists_and_focus(tmp_path, monkeypatch):
     assert w._ids == {"todo": [3], "done": [1]} and w.plate.status(1) == EXCLUDED
     assert w.lists["done"].item(0).foreground().color().name() == "#c62828"  # red: excluded
     w.lists["todo"].setCurrentRow(0)
-    w.decide_selected("todo", VALID)
+    button["todo include"].click()  # a real click: clicked() passes an argument the slot must ignore
     pump()
     assert w._ids == {"todo": [], "done": [3, 1]}  # included first
     assert w.lists["done"].item(0).foreground().color().name() == "#2e7d32"  # green: included
     w.lists["done"].clearSelection()
     w.lists["done"].setCurrentRow(1)  # colony 1
-    w.unreview_selected()  # Ctrl+U
+    button["done unreview"].click()
     pump()
     assert w._ids == {"todo": [1], "done": [3]} and w.plate.status(1) == EXCLUDED  # status kept
     saved = pd.read_parquet(plate / "colonies.parquet").set_index("colony_id").flags_reviewed
@@ -238,3 +241,21 @@ def test_export_review_tiles(tmp_path):
     gold = load_gold_set(out.root)  # readable as a gold set for training
     assert len(gold) == 2 and gold[0].image.shape == (TILE, TILE, 3) and gold[0].labels.shape == (TILE, TILE)
     assert (gold[0].labels > 0).any()
+
+
+def test_review_window_plate_without_flags(tmp_path, monkeypatch):
+    """A plate with nothing to review opens (empty lists used to raise KeyError: 'status')."""
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5 import QtWidgets
+    from scanlag.gui.review import ReviewWindow
+
+    store, plate = tiny_plate(tmp_path, n_col=2)
+    col = pd.read_parquet(plate / "colonies.parquet")
+    col[["flags", "n_flags"]] = ["", 0]
+    col.to_parquet(plate / "colonies.parquet")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    w = ReviewWindow([plate])
+    assert w._ids == {"todo": [], "done": []}
+    w.step_flag(1)  # nothing to step to
+    app.processEvents()
+    w.close()

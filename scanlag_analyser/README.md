@@ -505,34 +505,36 @@ scans** at the path stored in each `plate.json`, so the raw data must be reachab
 
 ### Layout
 
-* **Top bar:** plate selector with ◀ ▶, *Find colony no.* box (type a number, press Enter), buttons
-  *Exclude (Ctrl+E)*, *Include (Ctrl+I)*, *Unreview (Ctrl+U)*, *Reset plate*, *Full plate (Esc)*, *◀ flagged*,
-  *flagged ▶ (F)*,
-  check boxes, and *Finish & export*.
-* **Left:** the plate image (last frame by default), with a time slider under it.
-  Below that: the image layer (*Raw* or *Difference (frame − background)*, which is what MATLAB
+* **Top, two rows:** plate selector with ◀ ▶, *Find colony* box (type a number, press Enter), buttons
+  *Exclude* (Ctrl+E), *Include* (Ctrl+I), *Unreview* (Ctrl+U), *◀ flagged* / *flagged ▶* (Shift+F / F) and
+  *Finish & export*; below them the check boxes, *Full plate* (Esc) and *Reset plate*. Hover over a button
+  for its shortcut.
+* **Middle:** the plate image, the area graph and the flagged lists side by side; drag the dividers between
+  them to give one more room. The window opens at most 1500 × 950 px and never larger than the screen, and
+  fits screens down to about 1,100 px wide.
+* **Plate image:** the last frame by default. Under the three panels: the time slider, then the image layer (*Raw* or *Difference (frame − background)*, which is what MATLAB
   thresholds), *Black* / *White* level sliders and *Auto contrast*.
-* **Middle:** area of each colony over time (log scale by default); a dashed line marks the current frame.
+* **Graph:** area of each colony over time (log scale by default); a dashed line marks the current frame.
   Each panel has a matplotlib toolbar for zoom and pan (while zoom/pan is active, clicks do not select).
 * **Right:** the **flagged colonies** in two lists, **To review** above and **Reviewed** below (section
-  below), a box above them to show one kind of flag only, *Include selected* / *Exclude selected* under each
-  list, *Exclude all to review* and *Unreview selected*, and details of the selected colony (status,
+  below), a box above them to show one kind of flag only, *Include* / *Exclude* under each list, *Exclude
+  listed* and *Unreview*, and details of the selected colony (status,
   detected status, appearance time, final area, first merge, flags and whether they are reviewed).
 
-Click a colony on the plate, its curve in the graph or its line in a list to select it: a cyan ring around
-it and a wide yellow ring (to find it on a crowded plate), and a thick curve. Selecting it from a **list,
+Click a colony on the plate, its curve in the graph or its line in a list to select it: a wide yellow ring
+around it (to find it on a crowded plate) and a thick curve. Selecting it from a **list,
 the graph or *Find colony no.*** also centres the plate image on it, zoomed in so that its neighbours stay
 visible (half width 110 px or 7 colony radii, whichever is larger); **Esc** or *Full plate* shows the whole
 plate again (as does the image toolbar's Home button). Clicking on the plate selects without moving the view.
 
 ### Reviewing flagged colonies
 
-Every flagged colony starts in **To review**. Look at it, then include it (**Ctrl+I**, or *Include selected*)
-or exclude it (**Ctrl+E**, or *Exclude selected*): it moves to **Reviewed**. In both lists **green means
+Every flagged colony starts in **To review**. Look at it, then include it (**Ctrl+I**, or *Include* under the list)
+or exclude it (**Ctrl+E**, or *Exclude*): it moves to **Reviewed**. In both lists **green means
 included and red excluded**, so a colony excluded before review is red in *To review*. **Unreview**
-(**Ctrl+U**, or *Unreview selected*) moves the colonies selected in *Reviewed* (or the selected colony) back
+(**Ctrl+U**, or *Unreview*) moves the colonies selected in *Reviewed* (or the selected colony) back
 to *To review*, keeping their status, to think about them again. F / Shift+F step through *To review*;
-colonies still to review keep their orange "!" on the plate. *Exclude all to review* excludes every colony
+colonies still to review keep their orange "!" on the plate. *Exclude listed* excludes every colony
 *To review* lists (after the flag-kind box), asking first. Including or excluding any flagged colony, also
 from the plate, marks it reviewed.
 
@@ -586,8 +588,8 @@ own colour; with "Labels only", the line where their blob was split is white. On
 ### Bulk actions
 
 * **Flagged lists:** choose a flag kind in the box above the lists (e.g. *large at appearance*) to list only
-  those colonies. *Include selected* / *Exclude selected* decide the colonies selected in a list (Ctrl+click /
-  Shift+click to select several); *Exclude all to review* excludes every colony *To review* shows (asks first).
+  those colonies. *Include* / *Exclude* under a list decide the colonies selected in it (Ctrl+click /
+  Shift+click to select several); *Exclude listed* excludes every colony *To review* shows (asks first).
 * **Reset plate** undoes all your changes on the current plate: back to the automatic statuses, and every
   flagged colony to review again (asks first).
 
