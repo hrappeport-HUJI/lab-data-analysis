@@ -95,8 +95,8 @@ def test_find_scanners_groups_and_names(tmp_path):
     for d, scanner, stamps in (("T2", "1-3", ["20250806_1726", "20250806_1926"]), ("T24", "1-1.2", ["20250807_1511"])):
         (tmp_path / d / "ROI" / "sep_1").mkdir(parents=True)
         for s in stamps:
-            (tmp_path / d / f"vapc_scan_{scanner}_{s}.tif").write_bytes(b"")
-        (tmp_path / d / "ROI" / "sep_1" / f"vapc_scan_{scanner}_{stamps[0]}_1.tif").write_bytes(b"")  # MATLAB crop
+            (tmp_path / d / f"vapc_scan_{scanner}_{s}.tif").write_bytes(b"x")
+        (tmp_path / d / "ROI" / "sep_1" / f"vapc_scan_{scanner}_{stamps[0]}_1.tif").write_bytes(b"x")  # MATLAB crop
     (tmp_path / "T2" / "run_vapc_scan20250806_1726.log").write_text("2025/08/06 17:26:30 - Starting.\n")
     scanners = {s.name: s for s in find_scanners(tmp_path)}
     assert set(scanners) == {"1-3", "1-1.2"}
@@ -120,7 +120,7 @@ def test_time_zero_skips_aborted_runs_and_finds_parent_logs(tmp_path):
     (tmp_path / "scanner1").mkdir()
     for name in ("_1-4.3u_20261015_1306.tiff", "_1-4.3u_20261015_1507.tiff", "scanner1/_1-4.1u_20261015_1307.tiff",
                  "scanner1/_1-4.1u_20261015_1507.tiff"):
-        (tmp_path / name).write_bytes(b"")
+        (tmp_path / name).write_bytes(b"x")
     scanners = {s.name: s for s in find_scanners(tmp_path)}
     for name in ("1-4.3u", "1-4.1u"):
         assert scanners[name].time_zero == "run_20261015_1305.log"
@@ -133,7 +133,7 @@ def test_select_scanners(tmp_path):
     from scanlag.pipeline.scans import find_scanners, select_scanners
 
     for name in ("epec-amp7_1-4.1u_20260224_2025.tiff", "epec-ctrl_1-5.1u_20260224_2025.tiff", "_1-6.1u_20260224_2025.tiff"):
-        (tmp_path / name).write_bytes(b"")
+        (tmp_path / name).write_bytes(b"x")
     scanners = find_scanners(tmp_path)
     names = lambda chosen: sorted(s.name for s in chosen)
     assert names(select_scanners(scanners)) == ["1-4.1u", "1-5.1u", "1-6.1u"]
@@ -182,3 +182,14 @@ def test_retrack_plate(tmp_path):
     tracks = pd.read_parquet(d / "tracks.parquet")
     last = tracks[tracks.frame == 5]
     assert last.merged.all() and last.area_px.nunique() == 1
+
+
+def test_find_scanners_leaves_out_empty_scans(tmp_path):
+    """A scan cut off when the robot stopped is a 0-byte file: it is left out and listed, not read."""
+    from scanlag.pipeline.scans import find_scanners
+
+    for stamp in ("20261016_1047", "20261016_1248", "20261018_1403"):
+        (tmp_path / f"_1-4.4.1u_{stamp}.tiff").write_bytes(b"" if stamp.endswith("1403") else b"x")
+    (s,) = find_scanners(tmp_path)
+    assert [p.name for p in s.scans] == ["_1-4.4.1u_20261016_1047.tiff", "_1-4.4.1u_20261016_1248.tiff"]
+    assert [p.name for p in s.empty] == ["_1-4.4.1u_20261018_1403.tiff"]

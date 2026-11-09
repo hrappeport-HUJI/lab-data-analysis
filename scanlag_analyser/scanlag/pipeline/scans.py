@@ -38,6 +38,7 @@ class Scanner:
     start: datetime  # time zero
     prefix: str = ""  # file name prefix ("" if none)
     time_zero: str = "first scan"  # where ``start`` came from: "first scan" or the robot log's name
+    empty: tuple[Path, ...] = ()  # 0-byte scan files left out (a scan cut off when the robot stopped)
 
     @property
     def times_min(self) -> list[float]:
@@ -74,14 +75,19 @@ def log_start(directory: Path, first_scan: datetime | None = None, root: Path | 
 
 
 def find_scanners(root: str | Path) -> list[Scanner]:
-    """All scanners under ``root`` (searched recursively, skipping MATLAB ROI folders)."""
+    """All scanners under ``root`` (searched recursively, skipping MATLAB ROI folders). Empty (0-byte)
+    scan files are left out and listed in ``Scanner.empty``."""
     root = Path(root)
     groups: dict[tuple[Path, str], list[Path]] = {}
+    empty: dict[tuple[Path, str], list[Path]] = {}
     prefixes: dict[tuple[Path, str], str] = {}
     for path in root.rglob("*"):
         if path.suffix.lower() not in (".tif", ".tiff") or SKIP_DIRS & set(path.relative_to(root).parts[:-1]):
             continue
         if m := SCAN_NAME.match(path.name):
+            if path.stat().st_size == 0:  # the robot stopped during this scan; reading it would fail
+                empty.setdefault((path.parent, m["scanner"]), []).append(path)
+                continue
             groups.setdefault((path.parent, m["scanner"]), []).append(path)
             prefixes.setdefault((path.parent, m["scanner"]), m["prefix"] or "")
     if not groups:
@@ -95,7 +101,8 @@ def find_scanners(root: str | Path) -> list[Scanner]:
         name = label if labels.count(label) == 1 else f"{directory.name}_{label}"
         logged = log_start(directory, times[0], root)
         start, source = logged if logged else (times[0], "first scan")
-        scanners.append(Scanner(name, label, directory, paths, times, start, prefixes[directory, label], source))
+        scanners.append(Scanner(name, label, directory, paths, times, start, prefixes[directory, label], source,
+                                tuple(sorted(empty.get((directory, label), [])))))
     return scanners
 
 

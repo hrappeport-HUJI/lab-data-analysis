@@ -46,6 +46,8 @@ def main() -> None:
         print(f"  first scan (background): {s.scans[0].name}, {when}")
         print(f"  last scan: {s.scans[-1].name}, {minutes[-1] / 60:.1f} h after time zero")
         print(f"  usual interval: {step:.0f} min")
+        if s.empty:
+            print(f"  WARNING: {len(s.empty)} empty (0-byte) scan(s) left out: " + ", ".join(p.name for p in s.empty))
         for i, a, b, d in gaps:
             if i == 0:
                 print(f"  background pause: regular scans start {d:.0f} min after the background scan, with {b}")
