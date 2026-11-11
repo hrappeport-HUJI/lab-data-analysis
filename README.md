@@ -37,6 +37,25 @@ Tests:
 python -m pytest plate_reader/tests
 ```
 
+## ScanLag
+
+`scanlag_analyser/` analyzes ScanLag colony appearance and growth from plate scans. It is a fork of [alongutf/scanlag_analyser](https://github.com/alongutf/scanlag_analyser), brought in as a git subtree with its history. Its own `README.md` covers setup (`environment.yml`) and the pipeline. It includes the trained U-Net weights (`models/unet_scanlag_v1/model.pt`, ~98 MB).
+
+To pull later upstream changes into the folder:
+
+```
+git remote add scanlag-upstream https://github.com/alongutf/scanlag_analyser  # once
+git subtree pull --prefix=scanlag_analyser scanlag-upstream master
+```
+
+To analyze a run, give an agent the `scanlag-experiment` skill (`Library/Skills/scanlag-experiment/` in the Zettelkasten), or follow it yourself: `scripts/inspect_scans.py` checks the scans and time zero, `scripts/check_density.py` finds TNTC plates, `scripts/scanlag_pipeline.py` segments and tracks, and `scripts/scanlag_analysis.py` draws the histograms. On Hagai's Mac it runs in the `ScriptHub` env (`environment-scripthub.yml` at the repo root, which also covers `plate_reader`), with the U-Net on the Apple GPU.
+
+Tests:
+
+```
+cd scanlag_analyser && python -m pytest tests
+```
+
 ## Adding another kind of analysis
 
 Each kind of repeating analysis gets a sibling of `plate_reader/`, such as `flow_cytometry/`, and a skill in `Library/Skills/`. The plate-reader pipeline is the pattern to follow:

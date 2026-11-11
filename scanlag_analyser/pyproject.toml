@@ -1,0 +1,39 @@
+[project]
+name = "scanlag"
+version = "0.1.0"
+description = "ScanLag colony appearance/growth analysis (successor of the MATLAB scan_lag code)"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-image",
+    "opencv-python-headless",
+    "tifffile",
+    "imagecodecs",
+    "zarr>=3",
+    "pandas",
+    "pyarrow",
+    "pillow",
+    "matplotlib",
+    "tqdm",
+    "plotly",
+]
+
+[project.optional-dependencies]
+gui = ["napari[pyqt5]"]
+dl = ["torch", "torchvision", "segmentation-models-pytorch>=0.5", "fastremap"]
+cellpose = ["cellpose>=4"]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+# napari's auto-loaded pytest plugin imports napari's test helpers before torch, after which torch's
+# CPU binary_cross_entropy_with_logits segfaults (torch 2.15, napari 0.10, macOS arm64). No test
+# uses napari's fixtures.
+addopts = "-p no:napari"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["scanlag*"]

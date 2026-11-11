@@ -1,0 +1,175 @@
+"""Write the reviewed results as plain tables.
+
+Per plate (``<results>/<scanner>/plate_<k>/``):
+
+* ``tracks.csv``: one row per colony and frame: frame, time_min, time_h, colony_id, area_px, x, y,
+  merged (the colony shares a blob with another colony: with the footprint tracker the area is its
+  share of the blob, with the seed tracker the whole blob's), bad_frame (a scan where many colonies'
+  areas are off, ``scanlag.pipeline.flags.bad_frames``: the growth metrics skip it), included
+* ``colonies.csv``: one row per colony: status (0 included, 1 near border, 2 excluded by the
+  reviewer, 3 zero final area), appearance time, time from LB to UB px (MATLAB
+  getAppearanceGrowth, NaN if the colony merged before reaching UB), final area, flags
+* ``area_matrix.csv``: time x colony area table of the included colonies (MATLAB's ``Area``)
+* ``final_objects.csv``: the objects of the last frame's whole-plate segmentation
+  (``scanlag.pipeline.run.final_objects``), if the plate has one
+
+Experiment level (``<results>/``): ``all_colonies.csv``, ``all_tracks.csv`` (with scanner and plate
+columns) and ``summary.csv`` (colony counts per plate).
+
+Whole-plate counts in the summary (empty for plates processed before they existed):
+
+* ``n_whole_plate``: the best count of the plate's colonies: ``n_included`` (tracked in the working
+  area, which separates colonies that merged later) + ``n_final_rim``
+* ``n_final_rim``: colonies at the last frame between the working area and ``final_fraction`` of the
+  radius (not tracked, so a merged cluster counts once)
+* ``n_final_full``: all colonies at the last frame out to ``final_fraction`` (clusters count once),
+  ``n_final_full_est`` the same with clusters counted by area, ``n_final_inner`` the working area's share
+* ``n_flags_unreviewed``: included flagged colonies the reviewer has not reviewed yet (included or
+  excluded in the review window; ``scanlag.pipeline.flags``, Reviewing); ``n_flagged_included`` counts
+  them all
+* ``n_possible_doublets``: included colonies flagged "possible doublet" (two colonies tracked as one,
+  so the plate likely holds this many more colonies than ``n_whole_plate``)
+* ``bad_frames``: the plate's bad frames (space-separated), if any
+
+``export`` always computes the growth time with ``merged_growth="exclude"`` (as MATLAB); see
+``plate_tables`` for the "split" alternative.
+"""
+
+from __future__ import annotations
+
+import json
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from scanlag.io.matlab_import import ColonyStatus
+from scanlag.pipeline.flags import reviewed_column, unreviewed_mask
+from scanlag.store import ResultsStore
+
+GROWTH_LB, GROWTH_UB = 20, 80  # px, MATLAB getAppearanceGrowth defaults
+MERGED_GROWTH = ("exclude", "split")
+
+
+def use_merged_frames(info: dict, merged_growth: str) -> bool:
+    """Whether growth metrics may use the frames where a colony is merged (see ``merged_growth``)."""
+    from scanlag.pipeline.run import merged_area_is_own
+
+    if merged_growth not in MERGED_GROWTH:
+        raise ValueError(f"merged_growth must be one of {MERGED_GROWTH}, not {merged_growth!r}")
+    if merged_growth == "exclude":
+        return False
+    if not merged_area_is_own(info):
+        warnings.warn(f"{info['scanner']} plate {info['plate']} was tracked with the seed tracker: merged colonies "
+                      "report the whole blob, so their merged frames are excluded from growth")
+        return False
+    return True
+
+
+def first_time(tracks: pd.DataFrame, area: float, own_only: bool) -> pd.Series:
+    t = tracks[(tracks.area_px >= area) & (~tracks.merged if own_only else True)]
+    return t.groupby("colony_id").time_min.min()
+
+
+def plate_tables(plate_dir: Path, merged_growth: str = "exclude") -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """(colonies, tracks, area matrix) tables of one processed plate, as written by ``export``.
+
+    ``merged_growth``: "exclude" (default, as MATLAB) ignores the frames where a colony is merged, so
+    a colony that merges before reaching UB has no growth time. "split" uses its share of the merged
+    blob instead; it needs plates tracked by the footprint tracker (seed-tracked plates fall back to
+    "exclude", with a warning).
+    """
+    info = json.loads((plate_dir / "plate.json").read_text())
+    use_merged = use_merged_frames(info, merged_growth)
+    colonies = pd.read_parquet(plate_dir / "colonies.parquet")
+    colonies = colonies.assign(flags_reviewed=reviewed_column(colonies))
+    if "flags_resolved" in colonies:  # the column's name before November 2026
+        colonies = colonies.drop(columns="flags_resolved")
+    tracks = pd.read_parquet(plate_dir / "tracks.parquet")
+    included = colonies.set_index("colony_id").status == ColonyStatus.VALID
+    if "bad_frame" not in tracks:  # plates processed before bad frames were detected
+        tracks = tracks.assign(bad_frame=False)
+    tracks = tracks.assign(time_h=tracks.time_min / 60,
+                           included=tracks.colony_id.map(included).fillna(False).astype(bool))
+
+    good = tracks[~tracks.bad_frame]
+    lb = first_time(good, GROWTH_LB, own_only=not use_merged)
+    ub = first_time(good, GROWTH_UB, own_only=not use_merged)
+    first_merge = tracks[tracks.merged].groupby("colony_id").time_min.min()
+    ids = colonies.colony_id
+    reached_ub = ub.reindex(ids).notna()
+    if not use_merged:
+        reached_ub &= ~(first_merge.reindex(ids) <= ub.reindex(ids)).fillna(False)
+    growth = (ub.reindex(ids) - lb.reindex(ids)).where(reached_ub.to_numpy())
+    colonies = colonies.assign(
+        status_name=[ColonyStatus(s).name for s in colonies.status],
+        included=colonies.status == ColonyStatus.VALID,
+        scanner=info["scanner"],
+        plate=info["plate"],
+        appearance_h=colonies.appearance_min / 60,
+        **{f"growth_{GROWTH_LB}_{GROWTH_UB}px_min": growth.to_numpy()},
+        first_merged_min=first_merge.reindex(ids).to_numpy(),
+    )
+    cols = ["scanner", "plate", "colony_id", "status", "status_name", "auto_status", "included", "appearance_frame",
+            "appearance_min", "appearance_h", f"growth_{GROWTH_LB}_{GROWTH_UB}px_min", "first_merged_min",
+            "final_area_px", "seed_x", "seed_y", "n_flags", "flags", "flags_reviewed"]
+    colonies = colonies[cols]
+
+    tracks = tracks.assign(scanner=info["scanner"], plate=info["plate"])[
+        ["scanner", "plate", "frame", "time_min", "time_h", "colony_id", "area_px", "x", "y", "merged", "bad_frame",
+         "included"]]
+    inc = tracks[tracks.included]
+    times = pd.Series(info["times_min"], name="time_min")
+    if inc.empty:
+        matrix = pd.DataFrame(index=range(len(times)))
+    else:
+        matrix = inc.pivot_table(index="frame", columns="colony_id", values="area_px", fill_value=0)
+        matrix = matrix.reindex(range(len(times)), fill_value=0)
+    matrix.columns = [f"colony_{c}" for c in matrix.columns]
+    matrix.insert(0, "time_min", times.to_numpy())
+    return colonies, tracks, matrix
+
+
+def export(results: Path, store: ResultsStore, log=print, plate_dirs: list[Path] | None = None) -> None:
+    """Write the tables of ``plate_dirs`` (default: every processed plate under ``results``), see the
+    module docstring. The experiment-level tables then hold only those plates."""
+    from scanlag.pipeline.run import load_plate_dirs
+
+    all_col, all_tr, summary = [], [], []
+    for plate_dir in load_plate_dirs(results) if plate_dirs is None else plate_dirs:
+        colonies, tracks, matrix = plate_tables(plate_dir)
+        rel = plate_dir.relative_to(store.root).parts
+        store.write_table(colonies, *rel, "colonies.csv")
+        store.write_table(tracks, *rel, "tracks.csv")
+        store.write_table(matrix, *rel, "area_matrix.csv")
+        if (plate_dir / "final_objects.parquet").exists():
+            store.write_table(pd.read_parquet(plate_dir / "final_objects.parquet"), *rel, "final_objects.csv")
+        info = json.loads((plate_dir / "plate.json").read_text())
+        final = info.get("final_count") or {}
+        review = plate_dir / "review.json"
+        reviewed = json.loads(review.read_text()).get("visited", False) if review.exists() else False
+        all_col.append(colonies)
+        all_tr.append(tracks)
+        counts = colonies.status_name.value_counts()
+        summary.append({"scanner": rel[0], "plate": rel[1], "reviewed": reviewed, "n_colonies": len(colonies),
+                        "n_included": int(colonies.included.sum()),
+                        **{f"n_{s.name.lower()}": int(counts.get(s.name, 0)) for s in ColonyStatus},
+                        "n_flagged_included": int(((colonies.n_flags > 0) & colonies.included).sum()),
+                        "n_flags_unreviewed": int((unreviewed_mask(colonies) & colonies.included).sum()),
+                        "n_whole_plate": int(colonies.included.sum()) + final["n_rim"] if final else None,
+                        "n_final_rim": final.get("n_rim"),
+                        "n_final_inner": final.get("n_inner"), "n_final_full": final.get("n_full"),
+                        "n_final_full_est": final.get("n_full_est"), "final_fraction": final.get("full_fraction"),
+                        "n_possible_doublets": int((colonies.included
+                                                    & colonies["flags"].fillna("").str.contains("possible doublet")).sum()),
+                        "bad_frames": " ".join(map(str, info.get("bad_frames") or []))})
+    if not summary:
+        raise FileNotFoundError(f"no processed plates in {results}")
+    store.write_table(pd.concat(all_col, ignore_index=True), "all_colonies.csv")
+    store.write_table(pd.concat(all_tr, ignore_index=True), "all_tracks.csv")
+    store.write_table(pd.DataFrame(summary), "summary.csv")
+    log(f"exported {len(summary)} plates to {store.root}")
+    if unreviewed := [f"{s['scanner']}/{s['plate']}" for s in summary if not s["reviewed"]]:
+        log(f"{len(unreviewed)} of them were never opened in the review window (automatic statuses): "
+            + ", ".join(unreviewed))
