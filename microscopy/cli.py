@@ -31,6 +31,7 @@ def main(argv=None):
         if command == "run":
             s.add_argument("--fields", nargs="+")
             s.add_argument("--baseline-only", action="store_true")
+            s.add_argument("--resume-from", help="Reuse saved label planes of an earlier run with identical segmentation settings")
         if command == "analyze":
             s.add_argument("--reviewed-only", action="store_true")
         if command == "serve":
@@ -66,7 +67,8 @@ def main(argv=None):
             from .pipeline import run
 
             result = run(
-                args.project, fields=args.fields, baseline_only=args.baseline_only
+                args.project, fields=args.fields, baseline_only=args.baseline_only,
+                resume_from=args.resume_from,
             )
             result = {k: result[k] for k in ["run_id", "fields"]}
         elif args.command == "analyze":

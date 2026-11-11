@@ -101,12 +101,19 @@ def materialize(project, run_id, operations):
         "set_links",
         "set_frame_quality",
         "set_measurement_frame",
+        "clear_event",
     }
     for op in operations:
         kind = op.get("type")
         if kind not in allowed:
             raise ValueError("Unknown review operation")
-        if kind == "set_event":
+        if kind == "clear_event":
+            # Revert one founder to its automatic call; earlier saves stay in the history.
+            fid = op.get("founder_id")
+            if fid not in data["event_overrides"]:
+                raise ValueError("This founder has no saved review to revert")
+            del data["event_overrides"][fid]
+        elif kind == "set_event":
             fid = op["founder_id"]
             if fid not in founders or founders[fid].get("split_children"):
                 raise ValueError("Review an active founder")

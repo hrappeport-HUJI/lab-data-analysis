@@ -41,7 +41,7 @@ def register_tracker(name, factory):
 
 
 def get_adapter(kind, name):
-    from . import classical  # registers builtins
+    from . import classical, watershed  # registers builtins
 
     registry = _SEGMENTERS if kind == "segmenter" else _TRACKERS
     if name in registry:

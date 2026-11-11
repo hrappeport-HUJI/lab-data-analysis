@@ -33,6 +33,21 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
+def check_loadable(path, expansion=6, fraction=0.6):
+    """Refuse to parse a JSON file whose in-memory size would starve this computer.
+
+    Python objects take several times the JSON size; a 5.9 GB run.json once exhausted a 16 GB Mac.
+    """
+    size = Path(path).stat().st_size
+    ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    if size * expansion > ram * fraction:
+        raise MemoryError(
+            f"{Path(path).name} is {size / 2**30:.1f} GB; loading it needs about "
+            f"{size * expansion / 2**30:.0f} GB of memory and this computer has {ram / 2**30:.0f} GB. "
+            "Re-run with the colony event mode (which stores only founder colonies) or compact it."
+        )
+
+
 def write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +97,9 @@ class Project:
         return self.root / "runs" / run_id
 
     def load_run(self, run_id):
-        run = read_json(self.run_path(run_id) / "run.json")
+        path = self.run_path(run_id) / "run.json"
+        check_loadable(path)
+        run = read_json(path)
         if run["manifest_digest"] != self.config["manifest_digest"]:
             raise ValueError("Run belongs to another image manifest")
         if run["config"]["structure_channel"] != self.config["structure_channel"]:

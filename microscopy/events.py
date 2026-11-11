@@ -37,6 +37,8 @@ def summarize(project, data):
             oid = next_ids[0]
         return True
 
+    colony_events = data.get("founder_events") or {}
+    run_usable = {(q["field"], q["frame"], q["channel"]): q["usable"] for q in data["quality"]}
     output = []
     for founder in data["founders"]:
         root = founder["observation_id"]
@@ -54,9 +56,38 @@ def summarize(project, data):
         end = node["frame"]
         reason = "recording_end"
         has_gap = False
+        flags = []
         if not usable.get((field, end, structure), True):
             current = set()
             reason = "baseline_unusable"
+        event = colony_events.get(founder["id"]) if current else None
+        if event is not None:
+            late = sorted(
+                q["frame"] for q in data["quality_overrides"]
+                if q["field"] == field and q["channel"] == structure and not q["usable"]
+                and node["frame"] <= q["frame"] <= event["upper_frame"]
+                and run_usable.get((field, q["frame"], structure), True)
+            )
+            if late:
+                # Frames excluded in review after the run: the cached automatic call used them.
+                event = {**event, "decision": "lost", "tracking_end_reason": "frames_excluded_after_run",
+                         "lower_frame": node["frame"], "upper_frame": late[0],
+                         "last_identity_frame": node["frame"],
+                         "flags": [*event.get("flags", []), "rerun_needed"]}
+        if event is not None:
+            # Colony-following run: the event was decided while segmenting (microscopy.colony).
+            current = set()
+            reason = event["tracking_end_reason"]
+            end = event["last_identity_frame"]
+            reachable = {root, *(i for i in event["observation_ids"] if i in byid)}
+            flags = list(event.get("flags", []))
+            has_gap = bool(event.get("contains_gap"))
+            if event["decision"] == "no_division" and (has_gap or founder["delayed_start"]):
+                # Same rule as linked tracks: absence of division needs the complete, continuous window.
+                event = {**event, "decision": "lost", "tracking_end_reason": "incomplete_window"}
+                reason = "incomplete_window"
+            if event["decision"] == "division":
+                division = (event["lower_frame"], event["upper_frame"])
         while current:
             end = min(byid[n]["frame"] for n in current)
             if end >= last:
@@ -86,7 +117,7 @@ def summarize(project, data):
                 break
             reachable.update(next_ids)
             current = next_ids
-        decision = (
+        decision = event["decision"] if event is not None else (
             "division"
             if division
             else (
@@ -98,9 +129,12 @@ def summarize(project, data):
                 else "lost"
             )
         )
-        lower, upper = (
-            division if division else (end, next((f for f in frames if f > end), end))
-        )
+        if event is not None:
+            lower, upper = event["lower_frame"], event["upper_frame"]
+        else:
+            lower, upper = (
+                division if division else (end, next((f for f in frames if f > end), end))
+            )
         if data["config"].get("analysis_scope") == "baseline_only":
             decision = "not_assessed"
             reason = "baseline_only"
@@ -154,6 +188,7 @@ def summarize(project, data):
             ),
             "last_identity_frame": end,
             "tracking_end_reason": reason,
+            "flags": flags,
             "observation_ids": sorted(reachable, key=lambda n: (byid[n]["frame"], n)),
             "note": override.get("note", "") if override else "",
             "review_required": not bool(override),

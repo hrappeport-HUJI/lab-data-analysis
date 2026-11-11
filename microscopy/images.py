@@ -23,8 +23,9 @@ def _read(path, modified_ns, size, expected_digest):
 
 def read_frame(project, field, frame, channel):
     record = project.frames[(str(field), int(frame), channel)]
-    path = (project.raw / record["path"]).resolve()
-    if not path.is_relative_to(project.raw):
+    root = project.raw.resolve()  # the acquisition folder itself may be a symlink (data moved, link left)
+    path = (root / record["path"]).resolve()
+    if not path.is_relative_to(root):
         raise ValueError("Image path outside acquisition")
     stat = path.stat()
     return _read(str(path), stat.st_mtime_ns, stat.st_size, record["sha256"])
