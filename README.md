@@ -68,3 +68,21 @@ Each kind of repeating analysis gets a sibling of `plate_reader/`, such as `flow
 6. **Offer a note** for the lab notebook.
 
 Move code into a shared folder only when a second analysis actually needs it.
+
+## Founder microscopy
+
+`microscopy/` is an installable Python package with a local browser review viewer. It supports 2D TIFF time series, replaceable segmentation/tracking adapters, founder splitting and outline/link edits, first-division/loss calls, focus exclusions, fluorescence measurements, and reproducible plots from versioned reviews.
+
+```sh
+python -m pip install -e '.[test]'
+lab-microscopy demo /tmp/founder-demo
+lab-microscopy serve /tmp/founder-demo/project
+```
+
+Read the [workflow guide](docs/microscopy/README.md), [assumptions ordered by importance](docs/microscopy/ASSUMPTIONS.md), and [validation status](docs/microscopy/validation.md). This is a synthetic-tested framework with conservative reference trackers; validate a pilot on each new acquisition. Experimental data and reviews stay outside the repository.
+
+The [microscopy-experiment skill](skills/microscopy-experiment/SKILL.md) lives in this repository so code and workflow can evolve together. To make it discoverable by Codex, copy or symlink its directory into your skills directory, or explicitly provide its `SKILL.md` path when starting an analysis. Installation is optional and is not performed automatically. The existing plate-reader skill remains in the Zettelkasten.
+
+```sh
+python -m pytest microscopy/tests plate_reader/tests
+```

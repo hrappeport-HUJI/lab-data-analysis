@@ -24,3 +24,11 @@ __pycache__/
 .DS_Store
 .idea/
 .venv/
+
+# Python package build products and local microscopy projects.
+*.egg-info/
+build/
+dist/
+*.sqlite
+*.sqlite-*
+*.npy
