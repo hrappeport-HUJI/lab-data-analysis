@@ -37,6 +37,11 @@ def summarize(project, data):
             oid = next_ids[0]
         return True
 
+    def confirmation_frame(oid):
+        for _ in range(required):
+            oid = children[oid][0]
+        return byid[oid]["frame"]
+
     colony_events = data.get("founder_events") or {}
     run_usable = {(q["field"], q["frame"], q["channel"]): q["usable"] for q in data["quality"]}
     output = []
@@ -105,7 +110,9 @@ def summarize(project, data):
                     if division is None:
                         division = (
                             byid[oid]["frame"],
-                            max(byid[c]["frame"] for c in cs),
+                            max(confirmation_frame(c) for c in cs)
+                            if data["config"].get("tracking", {}).get("adapter") == "cell_lineage"
+                            else max(byid[c]["frame"] for c in cs),
                         )
                 has_gap = has_gap or any(
                     byid[c]["frame"] - byid[oid]["frame"]
@@ -117,6 +124,8 @@ def summarize(project, data):
                 break
             reachable.update(next_ids)
             current = next_ids
+        if data["config"].get("tracking", {}).get("adapter") == "cell_lineage":
+            flags = sorted({flag for oid in reachable for flag in byid[oid].get("tracking_flags", [])})
         decision = event["decision"] if event is not None else (
             "division"
             if division
