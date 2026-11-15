@@ -1,4 +1,4 @@
-﻿"""Scheduling contracts: completion order never determines scientific replay order."""
+"""Scheduling contracts: completion order never determines scientific replay order."""
 from concurrent.futures import Future
 import numpy as np
 
@@ -76,3 +76,31 @@ def test_threshold_precedence_and_excluded_baseline(tmp_path):
     assert plan['threshold_used'] is None
     assert plan['parameters']['threshold_by_field']['1'] == 123
     assert [r['frame'] for r in plan['records']] == [0]
+
+
+def test_atomic_json_retries_windows_reader_and_cleans_up(tmp_path, monkeypatch):
+    import microscopy.storage as storage
+    from types import SimpleNamespace
+    original = storage.os.replace
+    failures = []
+    def busy_once(source, target):
+        failures.append(1)
+        if len(failures) == 1:
+            raise PermissionError("concurrent reader")
+        original(source, target)
+    # Simulate Windows without changing the shared os module or pathlib's platform.
+    monkeypatch.setattr(storage, "os", SimpleNamespace(
+        name="nt", fdopen=storage.os.fdopen, fsync=storage.os.fsync,
+        replace=busy_once, path=storage.os.path, unlink=storage.os.unlink))
+    monkeypatch.setattr(storage.time, "sleep", lambda delay: None)
+    storage.write_json(tmp_path/'progress.json', {"done": 2})
+    assert len(failures) == 2
+    assert (tmp_path/'progress.json').read_text().strip().endswith('2\n}')
+    assert not list(tmp_path.glob('.write-*'))
+    def always_busy(*args):
+        raise PermissionError("persistent permission failure")
+    storage.os.replace = always_busy
+    import pytest
+    with pytest.raises(PermissionError, match="persistent"):
+        storage.write_json(tmp_path/'progress.json', {"done": 3})
+    assert not list(tmp_path.glob('.write-*'))

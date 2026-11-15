@@ -36,12 +36,15 @@ def compare(reference, candidate):
     diff(ca,cb,'semantic_config')
     pa,pb = [{p.name:p for p in (folder/'labels').glob('*.npz')} for folder in [reference,candidate]]
     diff(sorted(pa),sorted(pb),'label_files')
-    for name in sorted(pa.keys() & pb.keys()):
+    for number, name in enumerate(sorted(pa.keys() & pb.keys()), 1):
         with np.load(pa[name]) as x, np.load(pb[name]) as y:
             diff(sorted(x.files),sorted(y.files),name+'/arrays')
             for key in set(x.files)&set(y.files):
-                if x[key].dtype!=y[key].dtype or x[key].shape!=y[key].shape or not np.array_equal(x[key],y[key]):
-                    print(f'DIFF {name}/{key}: arrays {x[key].shape}/{x[key].dtype} != {y[key].shape}/{y[key].dtype}'); differences+=1
+                left, right = x[key], y[key]
+                if left.dtype!=right.dtype or left.shape!=right.shape or not np.array_equal(left,right):
+                    print(f'DIFF {name}/{key}: arrays {left.shape}/{left.dtype} != {right.shape}/{right.dtype}'); differences+=1
+        if number % 64 == 0:
+            print(f'Compared {number}/{len(pa)} label planes', flush=True)
     summary={'equivalent':differences==0,'differences':differences,'label_planes':len(pa),
              'observations':len(a['observations']),'edges':len(a['edges']), 'founders':len(a['founders']),
              'founder_events':len(a.get('founder_events',{}))}

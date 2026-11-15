@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import uuid
 from contextlib import contextmanager
 from .system import physical_ram_bytes
@@ -58,7 +59,17 @@ def write_json(path, value):
             json.dump(value, f, indent=2, allow_nan=False)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(temporary, path)
+        # On Windows, a concurrent progress reader (or virus scanner) can briefly
+        # hold the destination without delete sharing. Preserve atomic publication,
+        # but allow that reader to close before treating the write as a failure.
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if os.name != "nt" or attempt == 7:
+                    raise
+                time.sleep(0.01 * 2**attempt)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
