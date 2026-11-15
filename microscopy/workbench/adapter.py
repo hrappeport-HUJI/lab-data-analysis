@@ -112,6 +112,7 @@ class RunReviewModel:
         self.fluorescence = list(cfg.get("fluorescence_channels", []))
         self.lock = threading.RLock()
         self._state = None
+        self._unreviewed = None  # (non-decision edits, automatic calls, drift) reused across decision saves
         self.arrays = Memo(48)  # raw uint16 frames, ~8 MB each at 2048x2048
         self.signals = Memo(12)  # background-subtracted fluorescence, float32
         self.pngs = Memo(400)  # rendered display images
@@ -187,7 +188,12 @@ class RunReviewModel:
                 return self._state
             data = materialize(self.project, self.run_id, operations)
             rows = summarize(self.project, data)
-            original = summarize(self.project, {**data, "event_overrides": {}})
+            # The automatic calls and the stage drift change only with edits other than event decisions,
+            # so a decision save reuses them (each took seconds on a 34-position run).
+            structural = json.dumps([op for op in operations if op.get("type") not in ("set_event", "clear_event")],
+                                    sort_keys=True, default=str)
+            cached = self._unreviewed if self._unreviewed and self._unreviewed[0] == structural else None
+            original = cached[1] if cached else summarize(self.project, {**data, "event_overrides": {}})
             nodes = {n["id"]: n for n in data["observations"]}
             usable = quality_map(data)
             quality_reason = {
@@ -198,7 +204,8 @@ class RunReviewModel:
             for row in rows:
                 for oid in row["observation_ids"]:
                     by_frame.setdefault((row["id"], nodes[oid]["frame"]), []).append(nodes[oid])
-            drift = self._drift(data, nodes)
+            drift = cached[2] if cached else self._drift(data, nodes)
+            self._unreviewed = (structural, original, drift)
             records = [
                 self._record(row, orig, data["event_overrides"].get(row["id"]))
                 for row, orig in zip(rows, original)
