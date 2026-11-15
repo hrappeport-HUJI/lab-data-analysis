@@ -125,7 +125,7 @@ A realistic target might be 10–15 min for a Pilot_3-sized experiment.
   1. Try a pretrained model without training, and score it through the tracker on Set A.
   2. If fine-tuning is needed, have it propose masks on crops from the tagged fields, and let the user accept or fix them in the viewer. The ScanLag code already has this pattern (review training tiles, `scanlag/train/cellpose_finetune.py`).
 - **The 87 tagged founders are too few to train a doublet or fate classifier.** They are enough to evaluate one.
-- **The tagged fields' raw images and tags travel on a hard drive** as `Pilot_3_tagging_package`. It has its own README.
+- **The tagged fields' raw images and tags travel on a hard drive** as `2026_11_04_microscopy_Pilot_3_tagging_package`. It has its own README.
 
 ## Open questions for the user
 
