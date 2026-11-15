@@ -34,8 +34,13 @@ def lower_priority(nice=10):
     try:
         if sys.platform == "win32":
             below_normal = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
-            kernel32 = ctypes.windll.kernel32
-            kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), below_normal)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            # Without these, ctypes truncates the 64-bit pseudo-handle to int and the call fails.
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+            kernel32.SetPriorityClass.restype = ctypes.c_int
+            if not kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), below_normal):
+                raise ctypes.WinError(ctypes.get_last_error())
         else:
             os.nice(int(nice))
     except (OSError, AttributeError):
