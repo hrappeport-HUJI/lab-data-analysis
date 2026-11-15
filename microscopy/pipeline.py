@@ -24,7 +24,7 @@ import shutil
 import os
 
 
-STATELESS_SEGMENTERS = {"ThresholdSegmenter", "WatershedSegmenter"}
+STATELESS_SEGMENTERS = {"ThresholdSegmenter", "WatershedSegmenter", "PrecomputedSegmenter"}
 
 # Resource guards: a run must never fill the disk or starve the machine.
 MIN_FREE_DISK_GB = 3.0  # a running job stops (resumably) below this
