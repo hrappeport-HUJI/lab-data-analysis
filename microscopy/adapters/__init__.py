@@ -41,7 +41,7 @@ def register_tracker(name, factory):
 
 
 def get_adapter(kind, name):
-    from . import classical, precomputed, watershed  # registers builtins
+    from . import classical, precomputed, watershed, cell_lineage  # registers builtins
 
     registry = _SEGMENTERS if kind == "segmenter" else _TRACKERS
     if name in registry:

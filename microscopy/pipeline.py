@@ -249,6 +249,8 @@ def _follow_field(job):
     tp = cfg.get("tracking", {})
     observations, edges, founders, qc = [], [], [], []
     previous, previous_labels, last_frame = [], None, None
+    if hasattr(tracker, "reset"):
+        tracker.reset()
     baseline = None
     threshold_used = plan["threshold_used"]
     colony = ColonyEvents(tp.get("colony")) if tp.get("events") == "colony" else None
@@ -263,7 +265,8 @@ def _follow_field(job):
         q, current = prepared["quality"], prepared["nodes"]
         qc.append(q)
         if not q["usable"]:
-            previous, previous_labels, last_frame = [], None, frame
+            if type(tracker).__name__ != "CellLineageTracker":
+                previous, previous_labels, last_frame = [], None, frame
             if colony_started:
                 colony.skip(frame)
             continue
@@ -308,7 +311,8 @@ def _follow_field(job):
                 colony.start(frame, labels, current, founders)
                 colony_started = True
         step = int(cfg.get("expected_frame_step", 1))
-        if previous and last_frame is not None and frame == last_frame + step:
+        if (previous or type(tracker).__name__ == "CellLineageTracker") and last_frame is not None and (frame == last_frame + step or
+                (type(tracker).__name__ == "CellLineageTracker" and frame == last_frame + 2 * step)):
             edges.extend(
                 tracker.link(
                     previous,
@@ -318,6 +322,8 @@ def _follow_field(job):
                     parameters=tp,
                 )
             )
+        elif type(tracker).__name__ == "CellLineageTracker":
+            tracker.reset()
         observations.extend(current)
         # Heartbeat: lets a person or agent see that a long run is progressing (or has stalled).
         write_json(directory / "progress" / f"{fi:04}.json",
@@ -408,7 +414,7 @@ def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=Fal
             raise ValueError("field_workers must be 1-8")
         if field_workers > 1 and (
             type(segmenter).__name__ not in STATELESS_SEGMENTERS
-            or type(tracker).__name__ not in {"OverlapTracker", "CentroidTracker"}
+            or type(tracker).__name__ not in {"OverlapTracker", "CentroidTracker", "CellLineageTracker"}
         ):
             raise ValueError(
                 "Parallel fields currently require stateless reference adapters"
@@ -418,7 +424,7 @@ def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=Fal
             raise ValueError("Segmentation workers must be 1–8")
         workers = frame_workers
         if workers > 1 and (type(segmenter).__name__ not in STATELESS_SEGMENTERS
-                            or type(tracker).__name__ not in {"OverlapTracker", "CentroidTracker"}):
+                            or type(tracker).__name__ not in {"OverlapTracker", "CentroidTracker", "CellLineageTracker"}):
             raise ValueError("Parallel segmentation requires stateless reference adapters")
         plans = [_field_plan(p, cfg, baseline_only, field) for field in selected]
         write_json(directory / "field_plan.json", plans)
