@@ -4,7 +4,7 @@ Code for analyses that repeat across experiments. It holds code only.
 
 | What | Where |
 |---|---|
-| Code | This repo, cloned to `~/PycharmProjects/lab-data-analysis` |
+| Code | This repo, cloned to `~/Research/lab-data-analysis` |
 | Data: raw files, plate maps, notebooks and results of each experiment | `~/PycharmProjects/ScriptHub/ReaderPlot/YYYY_MM_DD_name/`, backed up on Google Drive |
 | How to run an analysis, and what to ask first | Skills in the Zettelkasten: `Library/Skills/` |
 | What an experiment was and what it showed | Experiment notes in the Zettelkasten: `Library/LabNotebook/Experiments/` |
