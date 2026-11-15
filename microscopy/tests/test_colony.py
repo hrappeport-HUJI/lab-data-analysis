@@ -222,8 +222,10 @@ def test_run_reports_progress_and_status(tmp_path):
     import json
 
     assert json.loads((directory / "status.json").read_text())["state"] == "complete"
-    progress = [json.loads(f.read_text()) for f in sorted((directory / "progress").glob("*.json"))]
+    progress = [json.loads(f.read_text()) for f in sorted((directory / "progress").glob("[0-9]*.json"))]
     assert len(progress) == 4 and all(p["done"] == p["total"] for p in progress)
+    segmented = [json.loads(f.read_text()) for f in (directory / "progress").glob("segmented-*.json")]
+    assert len(segmented) == 4 and all(p["segmented"] == p["total"] for p in segmented)
 
 
 def test_unguarded_launch_script_fails_fast_instead_of_hanging(tmp_path):

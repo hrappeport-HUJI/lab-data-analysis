@@ -1,8 +1,12 @@
 """Algorithm runs are immutable; later corrections are independent review revisions."""
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from concurrent.futures.process import BrokenProcessPool
 from collections import deque
+from functools import partial
+import tempfile
+import time
+import multiprocessing
 import json
 import subprocess
 from pathlib import Path
@@ -24,7 +28,7 @@ STATELESS_SEGMENTERS = {"ThresholdSegmenter", "WatershedSegmenter"}
 
 # Resource guards: a run must never fill the disk or starve the machine.
 MIN_FREE_DISK_GB = 3.0  # a running job stops (resumably) below this
-LABEL_PLANE_MB = 0.6  # generous per-frame estimate for compressed label planes
+LABEL_PLANE_MB = 1.2  # per-frame budget for compressed labels, nodes and atomic temporary files
 WORKER_NICE = 10  # field worker processes run at lower priority so the computer stays usable
 
 
@@ -79,14 +83,9 @@ def validate_graph(observations, edges):
     return byid, parents, children
 
 
-def _process_field(job):
-    """One field, start to finish. Module level so fields can run in separate processes."""
-    p, cfg, segmenter, tracker, baseline_only, directory, n_selected, fi, field, reuse = job
-    if __import__("multiprocessing").current_process().name != "MainProcess":
-        lower_priority(cfg.get("worker_nice", WORKER_NICE))
-    sp, tp = cfg.get("segmentation", {}), cfg.get("tracking", {})
+def _field_plan(p, cfg, baseline_only, field):
+    sp = cfg.get("segmentation", {})
     structural = cfg["structure_channel"]
-    observations, edges, founders, qc = [], [], [], []
     records = sorted(
         (
             r
@@ -97,8 +96,6 @@ def _process_field(job):
     )
     if baseline_only:
         records = records[:1]
-    previous, previous_labels, last_frame = [], None, None
-    baseline = None
     fsp = sp
     threshold_used = None
     if sp.get("threshold_from_first_frame") and field not in sp.get("threshold_by_field", {}):
@@ -109,80 +106,104 @@ def _process_field(job):
         first = read_frame(p, field, records[0]["frame"], structural)
         threshold_used = auto_threshold(first, float(sp.get("background_sigma_px", 8)))
         fsp = {**sp, "threshold_by_field": {**sp.get("threshold_by_field", {}), field: threshold_used}}
-    colony = ColonyEvents(tp.get("colony")) if tp.get("events") == "colony" else None
-    colony_started = False
+    return {"field": field, "records": records, "parameters": fsp,
+            "threshold_used": threshold_used}
 
-    def prepare(record):
-        frame = record["frame"]
-        q = {"field": field, "frame": frame, "channel": structural}
-        if frame in cfg.get("quality", {}).get(
-            "excluded_structure_frames", {}
-        ).get(field, []):
-            return (
-                record,
-                None,
-                {**q, "usable": False, "reason": "explicit_image_exclusion"},
-                None,
-            )
-        image = read_frame(p, field, frame, structural)
-        q.update(quality(image))
-        minimum = cfg.get("quality", {}).get("min_focus_score")
-        q["usable"] = minimum is None or q["focus_score"] >= minimum
-        q["reason"] = "" if q["usable"] else "focus_below_configured_threshold"
-        saved = reuse / f"{frame:09}.npz" if reuse is not None else None
-        if q["usable"] and saved is not None and saved.exists():
-            # Resuming: this frame was segmented by an earlier, identically configured run.
-            with np.load(saved) as stored:
-                labels = validate_labels(stored["labels"], image.shape)
-        else:
-            labels = (
-                validate_labels(
-                    segmenter.segment(image, context=record, parameters=fsp),
-                    image.shape,
-                )
-                if q["usable"]
-                else None
-            )
-        return record, image, q, labels
 
-    def prepared():
-        workers = int(sp.get("workers", 1))
-        if not 1 <= workers <= 8:
-            raise ValueError("Segmentation workers must be 1–8")
-        if workers > 1 and type(segmenter).__name__ not in STATELESS_SEGMENTERS:
-            raise ValueError(
-                "Parallel segmentation currently requires the stateless reference segmenter"
-            )
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            source = iter(records)
-            pending = deque()
-            for _ in range(workers):
-                rec = next(source, None)
-                if rec is not None:
-                    pending.append(pool.submit(prepare, rec))
-            while pending:
-                result = pending.popleft().result()
-                rec = next(source, None)
-                if rec is not None:
-                    pending.append(pool.submit(prepare, rec))
-                yield result
+_WORKER = None
+_NATIVE_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                       "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS", "BLIS_NUM_THREADS")
 
-    for record, image, q, labels in prepared():
-        frame = record["frame"]
-        qc.append(q)
-        if not q["usable"]:
-            previous, previous_labels, last_frame = [], None, frame
-            if colony_started:
-                colony.skip(frame)
-            continue
-        label_file = f"labels/{fi:04}_{frame:09}.npz"
-        (directory / "labels").mkdir(exist_ok=True)
-        check_disk(directory)  # stop cleanly (resumable) before the disk fills
-        np.savez_compressed(
-            directory / label_file,
-            labels=labels.astype(np.uint16) if labels.max(initial=0) < 65536 else labels,
+
+def _initialize_worker(project_root, cfg, segmenter, directory):
+    global _WORKER
+    # Also retain the inherited caps for libraries imported lazily in a worker.
+    for name in _NATIVE_THREAD_VARS:
+        os.environ[name] = "1"
+    lower_priority(cfg.get("worker_nice", WORKER_NICE))
+    _WORKER = Project(project_root), cfg, segmenter, Path(directory)
+
+
+def _bounded_results(pool, function, jobs, limit):
+    """Consume completions, keeping at most limit jobs (and their metadata) outstanding."""
+    source = iter(jobs)
+    pending = set()
+    def fill():
+        while len(pending) < limit:
+            job = next(source, None)
+            if job is None:
+                break
+            pending.add(pool.submit(function, job))
+    fill()
+    while pending:
+        done, pending = wait(pending, return_when=FIRST_COMPLETED)
+        for future in done:
+            yield future.result()
+        fill()
+
+
+def _frame_jobs(plans, reuse):
+    queues = deque((fi, plan, iter(plan["records"])) for fi, plan in enumerate(plans))
+    while queues:
+        fi, plan, records = queues.popleft()
+        record = next(records, None)
+        if record is not None:
+            yield fi, plan["field"], record, plan["parameters"], reuse.get(plan["field"])
+            queues.append((fi, plan, records))
+
+
+def _sidecar(directory, fi, frame):
+    return directory / "prepared" / f"{fi:04}_{frame:09}.json"
+
+
+def _prepare_frame(job, *, state=None):
+    p, cfg, segmenter, directory = state if state is not None else _WORKER
+    fi, field, record, fsp, reuse = job
+    structural = cfg["structure_channel"]
+    frame = record["frame"]
+    q = {"field": field, "frame": frame, "channel": structural}
+    if frame in cfg.get("quality", {}).get(
+        "excluded_structure_frames", {}
+    ).get(field, []):
+        q.update(usable=False, reason="explicit_image_exclusion")
+        write_json(_sidecar(directory, fi, frame),
+                   {"schema_version": 1, "quality": q, "shape": None, "nodes": []})
+        return fi, frame
+    image = read_frame(p, field, frame, structural)
+    q.update(quality(image))
+    minimum = cfg.get("quality", {}).get("min_focus_score")
+    q["usable"] = minimum is None or q["focus_score"] >= minimum
+    q["reason"] = "" if q["usable"] else "focus_below_configured_threshold"
+    saved = reuse / f"{frame:09}.npz" if reuse is not None else None
+    if q["usable"] and saved is not None and saved.exists():
+        # Resuming: this frame was segmented by an earlier, identically configured run.
+        with np.load(saved) as stored:
+            labels = validate_labels(stored["labels"], image.shape)
+    else:
+        labels = (
+            validate_labels(
+                segmenter.segment(image, context=record, parameters=fsp),
+                image.shape,
+            )
+            if q["usable"]
+            else None
         )
-        current = []
+
+    label_file = f"labels/{fi:04}_{frame:09}.npz"
+    current = []
+    if labels is not None:
+        check_disk(directory)
+        fd, temporary = tempfile.mkstemp(prefix=".labels-", suffix=".npz", dir=directory / "labels")
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                np.savez_compressed(stream, labels=labels.astype(np.uint16)
+                                    if labels.max(initial=0) < 65536 else labels)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, directory / label_file)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
         for label, region in enumerate(ndimage.find_objects(labels), 1):
             if region is None:
                 continue
@@ -208,6 +229,38 @@ def _process_field(job):
                 ],
             }
             current.append(node)
+    # These sidecars are produced afresh for this run, never trusted across resumes.
+    # A completion marker is published only after its atomic label-plane replacement.
+    write_json(_sidecar(directory, fi, frame),
+               {"schema_version": 1, "quality": q, "shape": list(image.shape), "nodes": current})
+    return fi, frame
+
+
+def _follow_field(job):
+    cfg, tracker, directory, n_selected, fi, plan = job
+    field, records = plan["field"], plan["records"]
+    tp = cfg.get("tracking", {})
+    observations, edges, founders, qc = [], [], [], []
+    previous, previous_labels, last_frame = [], None, None
+    baseline = None
+    threshold_used = plan["threshold_used"]
+    colony = ColonyEvents(tp.get("colony")) if tp.get("events") == "colony" else None
+    colony_started = False
+
+    for record in records:
+        frame = record["frame"]
+        prepared = json.loads(_sidecar(directory, fi, frame).read_text())
+        if prepared["schema_version"] != 1:
+            raise ValueError("Unknown prepared-frame schema")
+        q, current = prepared["quality"], prepared["nodes"]
+        qc.append(q)
+        if not q["usable"]:
+            previous, previous_labels, last_frame = [], None, frame
+            if colony_started:
+                colony.skip(frame)
+            continue
+        with np.load(directory / f"labels/{fi:04}_{frame:09}.npz") as stored:
+            labels = validate_labels(stored["labels"], prepared["shape"])
         can_start = frame == records[0]["frame"] or cfg.get("founders", {}).get(
             "allow_delayed_start", False
         )
@@ -219,7 +272,7 @@ def _process_field(job):
                 x0, y0, x1, y1 = node["bbox"]
                 reason = (
                     "edge"
-                    if min(x0, y0, image.shape[1] - x1, image.shape[0] - y1)
+                    if min(x0, y0, labels.shape[1] - x1, labels.shape[0] - y1)
                     < margin
                     else ""
                 )
@@ -262,6 +315,10 @@ def _process_field(job):
         write_json(directory / "progress" / f"{fi:04}.json",
                    {"field": field, "frame": frame, "done": len(qc), "total": len(records), "updated": utc()})
         previous, previous_labels, last_frame = current, labels, frame
+    # Publish a final replay count even when the last (or every) frame was excluded.
+    write_json(directory / "progress" / f"{fi:04}.json",
+               {"field": field, "frame": records[-1]["frame"], "done": len(qc),
+                "total": len(records), "updated": utc()})
     print(f"Processed field {field} ({fi+1}/{n_selected})", flush=True)
     events = colony.finish(records[-1]["frame"]) if colony_started else {}
     planes = {}
@@ -275,7 +332,7 @@ def _process_field(job):
             keep.update(event["observation_ids"])
         observations = [o for o in observations if o["id"] in keep]
         edges = [e for e in edges if e[0] in keep and e[1] in keep]
-    return observations, edges, founders, qc, events, threshold_used, planes
+    return fi, (observations, edges, founders, qc, events, threshold_used, planes)
 
 
 def _reusable_labels(p, resume_from, cfg, segmenter, selected):
@@ -287,7 +344,7 @@ def _reusable_labels(p, resume_from, cfg, segmenter, selected):
 
     def settings(c):
         seg = {k: v for k, v in c.get("segmentation", {}).items() if k not in {"workers"}}
-        return seg, c["structure_channel"], c.get("quality", {})
+        return seg, c["structure_channel"], c.get("quality", {}), c.get("manifest_digest")
 
     if settings(earlier["config"]) != settings(cfg) or earlier["segmenter_class"] != _class(segmenter):
         raise ValueError(f"Run {resume_from} used different segmentation settings; start a fresh run")
@@ -340,7 +397,7 @@ def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=Fal
 
         field_workers = int(cfg.get("field_workers", 1))
         if not 1 <= field_workers <= 8:
-            raise ValueError("field_workers must be 1–8")
+            raise ValueError("field_workers must be 1-8")
         if field_workers > 1 and (
             type(segmenter).__name__ not in STATELESS_SEGMENTERS
             or type(tracker).__name__ not in {"OverlapTracker", "CentroidTracker"}
@@ -348,24 +405,53 @@ def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=Fal
             raise ValueError(
                 "Parallel fields currently require stateless reference adapters"
             )
-        jobs = [
-            (p, cfg, segmenter, tracker, baseline_only, directory, len(selected), fi, field, reuse.get(field))
-            for fi, field in enumerate(selected)
-        ]
-        # Separate processes when parallel: the per-frame bookkeeping is Python code that threads
-        # cannot run concurrently. Built-in adapters are stateless and picklable.
-        Pool = ProcessPoolExecutor if field_workers > 1 else ThreadPoolExecutor
-        (directory / "progress").mkdir(exist_ok=True)
-        write_json(directory / "status.json", {"state": "running", "pid": os.getpid(), "fields": len(selected),
-                                               "parallel": Pool.__name__, "started": utc()})
-        field_pool = Pool(max_workers=field_workers)
+        frame_workers = int(cfg.get("frame_workers", max(field_workers, int(sp.get("workers", 1)))))
+        if not 1 <= frame_workers <= 8 or not 1 <= int(sp.get("workers", 1)) <= 8:
+            raise ValueError("Segmentation workers must be 1–8")
+        workers = frame_workers
+        if workers > 1 and (type(segmenter).__name__ not in STATELESS_SEGMENTERS
+                            or type(tracker).__name__ not in {"OverlapTracker", "CentroidTracker"}):
+            raise ValueError("Parallel segmentation requires stateless reference adapters")
+        plans = [_field_plan(p, cfg, baseline_only, field) for field in selected]
+        write_json(directory / "field_plan.json", plans)
+        for folder in ("progress", "labels", "prepared"):
+            (directory / folder).mkdir(exist_ok=True)
+        write_json(directory / "status.json", {"state": "running", "phase": "segmentation",
+                   "pid": os.getpid(), "workers": workers, "started": utc()})
+        # A single pool, with a phase barrier. The serial path keeps custom adapters usable.
+        Pool = ProcessPoolExecutor if workers > 1 else ThreadPoolExecutor
+        kwargs = dict(max_workers=workers)
+        if workers > 1:
+            kwargs.update(initializer=_initialize_worker, initargs=(str(p.root), cfg, segmenter, directory),
+                          mp_context=multiprocessing.get_context("spawn"))
+        # Windows spawn inherits these before importing NumPy/SciPy in the child.
+        saved_environment = {name: os.environ.get(name) for name in _NATIVE_THREAD_VARS}
+        for name in _NATIVE_THREAD_VARS:
+            os.environ[name] = "1"
+        field_pool = Pool(**kwargs)
         failed = True
+        phase_start = time.perf_counter()
         try:
-            founder_events, field_thresholds = {}, {}
-            label_planes = {}
-            for (obs, links, roots, checks, events, used, planes), field in zip(
-                field_pool.map(_process_field, jobs), selected
-            ):
+            prepare = (_prepare_frame if workers > 1 else
+                       partial(_prepare_frame, state=(p, cfg, segmenter, directory)))
+            counts = [0] * len(plans)
+            for fi, frame in _bounded_results(field_pool, prepare,
+                                              _frame_jobs(plans, reuse), 2 * frame_workers):
+                counts[fi] += 1
+                write_json(directory / "progress" / f"segmented-{fi:04}.json",
+                           {"field": selected[fi], "frame": frame, "segmented": counts[fi],
+                            "total": len(plans[fi]["records"]), "updated": utc()})
+            segmentation_s = time.perf_counter() - phase_start
+            write_json(directory / "status.json", {"state": "running", "phase": "replay",
+                       "pid": os.getpid(), "workers": workers, "updated": utc()})
+            phase_start = time.perf_counter()
+            jobs = [(cfg, tracker, directory, len(selected), fi, plan)
+                    for fi, plan in enumerate(plans)]
+            results = dict(_bounded_results(field_pool, _follow_field, jobs, min(field_workers, workers)))
+            replay_s = time.perf_counter() - phase_start
+            founder_events, field_thresholds, label_planes = {}, {}, {}
+            for fi, field in enumerate(selected):
+                obs, links, roots, checks, events, used, planes = results.pop(fi)
                 founder_events.update(events)
                 label_planes.update(planes)
                 if used is not None:
@@ -377,14 +463,18 @@ def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=Fal
             failed = False
         except BrokenProcessPool as e:
             raise RuntimeError(
-                "A field worker process died. If you started this run from your own script, put the "
-                "call inside `if __name__ == \"__main__\":` (worker processes re-import the script), "
-                "or set field_workers to 1."
+                'A field worker process died. Put the call inside `if __name__ == "__main__":` '
+                '(worker processes re-import the script), or set worker counts to 1.'
             ) from e
         finally:
-            # On failure do not wait for workers that may never finish (e.g. a worker that could not
-            # start because the launching script lacks an `if __name__ == "__main__":` guard).
             field_pool.shutdown(wait=not failed, cancel_futures=failed)
+            for name, value in saved_environment.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        write_json(directory / "timing.json", {"segmentation_s": segmentation_s,
+                   "replay_s": replay_s, "workers": workers, "field_workers": field_workers})
         validate_graph(observations, edges)
         try:
             commit = subprocess.check_output(
