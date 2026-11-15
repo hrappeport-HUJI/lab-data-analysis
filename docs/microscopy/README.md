@@ -54,6 +54,21 @@ Corrections under the expandable editor:
 
 Mask, link, split, and structure-quality edits invalidate preceding event confirmations conservatively across the run. Reconfirm affected calls before using reviewed-only analysis. Event revisions themselves remain recoverable in SQLite. The UI saves edits explicitly; unsaved decision fields are drafts in browser local storage, not part of the scientific record. Undo creates another revision and removes the last active operation. A stale browser tab cannot overwrite a newer revision silently.
 
+## Reviewing from another computer
+
+The founder viewer (`python -m microscopy.workbench PROJECT`) listens only on the computer running it unless told otherwise. To review from a laptop while the images and computation stay on the lab PC:
+
+```sh
+python -m microscopy.workbench PROJECT --port 8890 --host 0.0.0.0 \
+    --allow-client 132.64.81.20 --allow-client 100.64.0.0/10 --allow-host lab-pc
+```
+
+- `--allow-client` (required, repeatable): the laptop's address, or a network. `100.64.0.0/10` is Tailscale's address range, for review from anywhere through Tailscale.
+- `--allow-host`: extra names the browser may use for the PC, such as its Tailscale name. The PC's own addresses are accepted automatically.
+- The viewer prints one link per address. Each carries an access key (`?key=…`), which is kept in `~/.lab-microscopy/viewer_access_key`, so a bookmarked link survives restarts. Delete that file to revoke old links.
+- The PC's own firewall must also allow the port: on Windows, an administrator runs `New-NetFirewallRule -DisplayName "Microscopy viewer" -Direction Inbound -Protocol TCP -LocalPort 8890-8899 -RemoteAddress LAPTOP_IP,100.64.0.0/10 -Action Allow`.
+- On a campus network the traffic is plain HTTP, so another computer on that network could in principle read the images and the key. Tailscale traffic is encrypted.
+
 ## Regenerate and export
 
 Use **Results → Regenerate results**, or:

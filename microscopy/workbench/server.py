@@ -10,9 +10,11 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import csv
 import io
+import ipaddress
 import json
 import mimetypes
 import secrets
+import socket
 
 from .adapter import RunReviewModel
 from ..storage import Conflict
@@ -37,19 +39,75 @@ def load_tagging_sets(path, fields):
     return sets
 
 
+LOOPBACK = ("127.0.0.1", "localhost")
+KEY_FILE = Path.home() / ".lab-microscopy" / "viewer_access_key"
+
+
+def access_key(path=KEY_FILE):
+    """Access key for network mode, kept between runs so a bookmarked link keeps working."""
+    path = Path(path)
+    if path.exists():
+        key = path.read_text().strip()
+        if len(key) >= 32:
+            return key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = secrets.token_urlsafe(32)
+    path.write_text(key)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return key
+
+
+def local_addresses():
+    """This computer's own IPv4 addresses and host name, used to accept requests addressed to it."""
+    names = {socket.gethostname().lower()}
+    try:
+        names |= {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+    except OSError:
+        pass
+    return names
+
+
 class WorkbenchServer(ThreadingHTTPServer):
+    """Loopback-only by default. With ``host`` set to a network address, the viewer is reachable
+    from the networks in ``allow_clients`` and requires an access key in the link."""
+
     daemon_threads = True
 
-    def __init__(self, project, port=0, run_id=None, read_only=False, tagging_sets=None):
+    def __init__(self, project, port=0, run_id=None, read_only=False, tagging_sets=None,
+                 host="127.0.0.1", allow_clients=(), allow_hosts=(), key_file=KEY_FILE):
+        self.network = host not in LOOPBACK
+        if self.network and not allow_clients:
+            raise ValueError("Serving on the network needs --allow-client (the Mac's address or a network such as 100.64.0.0/10)")
+        self.allow_clients = [ipaddress.ip_network(c, strict=False) for c in allow_clients]
         self.model = RunReviewModel(project, run_id, read_only=read_only)
         self.model.state()  # fail early on an unreadable run or review store
         self.tagging_sets = load_tagging_sets(tagging_sets, self.model.fields)
         self.token = secrets.token_urlsafe(32)
-        super().__init__(("127.0.0.1", port), Handler)
+        self.access_key = access_key(key_file) if self.network else None
+        super().__init__((host, port), Handler)
+        names = set(LOOPBACK) | {h.lower() for h in allow_hosts}
+        if self.network:
+            names |= local_addresses() if host == "0.0.0.0" else {host}
+        self.host_names = names
 
     @property
     def origin(self):
         return f"http://127.0.0.1:{self.server_address[1]}"
+
+    def links(self):
+        """Addresses to open the viewer at."""
+        port = self.server_address[1]
+        if not self.network:
+            return [f"{self.origin}/"]
+        hosts = sorted(h for h in self.host_names if h not in LOOPBACK)
+        return [f"http://{h}:{port}/?key={self.access_key}" for h in hosts]
+
+    def client_allowed(self, address):
+        ip = ipaddress.ip_address(address)
+        return ip.is_loopback or any(ip in net for net in self.allow_clients)
 
     def server_close(self):
         super().server_close()
@@ -66,16 +124,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def guards(self, api=False):
         port = self.server.server_address[1]
-        allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
-        if self.headers.get("Host") not in allowed:
-            raise PermissionError("Only the loopback address is accepted")
+        if not self.server.client_allowed(self.client_address[0]):
+            raise PermissionError("This computer is not allowed to use the viewer")
+        allowed = {f"{h}:{port}" for h in self.server.host_names}
+        if (self.headers.get("Host") or "").lower() not in allowed:
+            raise PermissionError("Requests must address this viewer by one of its own names")
         origin = self.headers.get("Origin")
-        if origin and origin not in {f"http://{v}" for v in allowed}:
+        if origin and origin.lower() not in {f"http://{v}" for v in allowed}:
             raise PermissionError("Cross-origin requests are not permitted")
-        if api and urlparse(self.path).path != "/api/session" and not secrets.compare_digest(
+        path = urlparse(self.path).path
+        if api and path == "/api/session" and self.server.network and not self.from_loopback():
+            key = parse_qs(urlparse(self.path).query).get("key", [""])[0]
+            if not secrets.compare_digest(key, self.server.access_key):
+                raise PermissionError("Missing or wrong access key: open the full link printed when the viewer started")
+        if api and path != "/api/session" and not secrets.compare_digest(
             self.headers.get("X-Review-Token", ""), self.server.token
         ):
             raise PermissionError("Missing review-session token")
+
+    def from_loopback(self):
+        return ipaddress.ip_address(self.client_address[0]).is_loopback
 
     def send(self, status, data, ctype="application/json", headers=None):
         body = json.dumps(data, allow_nan=False).encode() if ctype == "application/json" and not isinstance(data, bytes) else data
@@ -210,9 +278,16 @@ class Handler(BaseHTTPRequestHandler):
             self.error(e)
 
 
-def serve(project, port=0, run_id=None, read_only=False, open_browser=False, tagging_sets=None):
-    server = WorkbenchServer(project, port, run_id, read_only=read_only, tagging_sets=tagging_sets)
-    print(f"Founder review ({'read-only preview' if read_only else 'editable'}): {server.origin}/", flush=True)
+def serve(project, port=0, run_id=None, read_only=False, open_browser=False, tagging_sets=None,
+          host="127.0.0.1", allow_clients=(), allow_hosts=()):
+    server = WorkbenchServer(project, port, run_id, read_only=read_only, tagging_sets=tagging_sets,
+                             host=host, allow_clients=allow_clients, allow_hosts=allow_hosts)
+    mode = "read-only preview" if read_only else "editable"
+    print(f"Founder review ({mode}): {server.origin}/", flush=True)
+    if server.network:
+        print("From other computers (" + ", ".join(allow_clients) + "), open:", flush=True)
+        for link in server.links():
+            print("  " + link, flush=True)
     if open_browser:
         import webbrowser
         webbrowser.open(server.origin + "/")

@@ -197,3 +197,67 @@ def test_tagging_sets_are_validated_and_served(project, tmp_path):
     bad.write_text(json.dumps({"sets": {"A": ["999"]}}))
     with pytest.raises(ValueError, match="999"):
         WorkbenchServer(project.root, 0, read_only=True, tagging_sets=bad)
+
+
+def _non_loopback_address():
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.0.2.1", 9))  # no packet is sent; this only picks the outgoing interface
+        address = s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+    return None if address.startswith("127.") else address
+
+
+def _get(url, host=None):
+    headers = {"Host": host} if host else {}
+    try:
+        response = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=10)
+        return response.status, json.loads(response.read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_network_mode_needs_allowed_client_and_access_key(project, tmp_path):
+    with pytest.raises(ValueError, match="allow-client"):
+        WorkbenchServer(project.root, 0, read_only=True, host="0.0.0.0")
+    address = _non_loopback_address()
+    if address is None:
+        pytest.skip("no non-loopback network address on this computer")
+    key_file = tmp_path / "key"
+    server = WorkbenchServer(project.root, 0, read_only=True, host="0.0.0.0",
+                             allow_clients=[address + "/32"], allow_hosts=["pc.example"], key_file=key_file)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        port = server.server_address[1]
+        base = f"http://{address}:{port}"
+        key = key_file.read_text().strip()
+        assert any(link.endswith("?key=" + key) for link in server.links())
+        assert _get(base + "/api/session")[0] == 403
+        assert _get(base + "/api/session?key=wrong")[0] == 403
+        status, session = _get(base + "/api/session?key=" + key)
+        assert status == 200 and session["token"]
+        assert _get(f"{base}/api/session?key={key}", host=f"evil.example:{port}")[0] == 403
+        assert _get(f"{base}/api/session?key={key}", host=f"pc.example:{port}")[0] == 200
+        status, data = _get(f"http://127.0.0.1:{port}/api/session")  # the PC itself needs no key
+        assert status == 200
+        # the key survives a restart, so bookmarked links keep working
+        again = WorkbenchServer(project.root, 0, read_only=True, host="0.0.0.0",
+                                allow_clients=[address + "/32"], key_file=key_file)
+        assert again.access_key == key
+        again.server_close()
+    finally:
+        server.shutdown()
+        server.server_close()
+    blocked = WorkbenchServer(project.root, 0, read_only=True, host="0.0.0.0",
+                              allow_clients=["198.51.100.0/24"], key_file=key_file)
+    threading.Thread(target=blocked.serve_forever, daemon=True).start()
+    try:
+        status, body = _get(f"http://{address}:{blocked.server_address[1]}/api/session?key={key}")
+        assert status == 403 and "not allowed" in body["error"]
+    finally:
+        blocked.shutdown()
+        blocked.server_close()
