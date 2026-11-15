@@ -80,12 +80,12 @@ class WorkbenchServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, project, port=0, run_id=None, read_only=False, tagging_sets=None,
-                 host="127.0.0.1", allow_clients=(), allow_hosts=(), key_file=KEY_FILE):
+                 host="127.0.0.1", allow_clients=(), allow_hosts=(), key_file=KEY_FILE, image_format="png"):
         self.network = host not in LOOPBACK
         if self.network and not allow_clients:
             raise ValueError("Serving on the network needs --allow-client (the Mac's address or a network such as 100.64.0.0/10)")
         self.allow_clients = [ipaddress.ip_network(c, strict=False) for c in allow_clients]
-        self.model = RunReviewModel(project, run_id, read_only=read_only)
+        self.model = RunReviewModel(project, run_id, read_only=read_only, image_format=image_format)
         self.model.state()  # fail early on an unreadable run or review store
         self.tagging_sets = load_tagging_sets(tagging_sets, self.model.fields)
         self.token = secrets.token_urlsafe(32)
@@ -260,7 +260,8 @@ class Handler(BaseHTTPRequestHandler):
             auto_contrast=q.get("contrast") == "auto",
         )
         self.m.prefetch(record, frame, channel)
-        self.send(200, png, "image/png", {"X-Frame-Meta": json.dumps(meta)})
+        ctype = "image/jpeg" if self.m.image_format == "jpeg" else "image/png"
+        self.send(200, png, ctype, {"X-Frame-Meta": json.dumps(meta)})
 
     def do_POST(self):
         try:
@@ -293,9 +294,10 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(project, port=0, run_id=None, read_only=False, open_browser=False, tagging_sets=None,
-          host="127.0.0.1", allow_clients=(), allow_hosts=()):
+          host="127.0.0.1", allow_clients=(), allow_hosts=(), image_format="png"):
     server = WorkbenchServer(project, port, run_id, read_only=read_only, tagging_sets=tagging_sets,
-                             host=host, allow_clients=allow_clients, allow_hosts=allow_hosts)
+                             host=host, allow_clients=allow_clients, allow_hosts=allow_hosts,
+                             image_format=image_format)
     mode = "read-only preview" if read_only else "editable"
     if server.network:
         print(f"Founder review ({mode}), for this PC and " + ", ".join(allow_clients) + ". Open one of:", flush=True)

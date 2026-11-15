@@ -98,7 +98,10 @@ class _CachedRunProject(Project):
 
 
 class RunReviewModel:
-    def __init__(self, root, run_id=None, read_only=True):
+    def __init__(self, root, run_id=None, read_only=True, image_format="png"):
+        if image_format not in ("png", "jpeg"):
+            raise ValueError("image_format must be png or jpeg")
+        self.image_format = image_format  # jpeg: ~4x smaller display images for slow (remote) links
         self.project = _CachedRunProject(root)
         self.root = self.project.root
         self.run_id = run_id or self.project.latest_run()
@@ -515,7 +518,11 @@ class RunReviewModel:
         else:
             count = len(self.state()["nodes_at"].get((record["id"], frame), []))
         stream = io.BytesIO()
-        Image.fromarray(rgb).save(stream, format="PNG", compress_level=1)
+        if self.image_format == "jpeg":
+            # 4:4:4 chroma keeps the one-pixel cyan outlines sharp
+            Image.fromarray(rgb).save(stream, format="JPEG", quality=92, subsampling=0)
+        else:
+            Image.fromarray(rgb).save(stream, format="PNG", compress_level=1)
         st = self.state()
         meta = {
             "frame": frame,
