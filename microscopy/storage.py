@@ -9,6 +9,7 @@ import sqlite3
 import tempfile
 import uuid
 from contextlib import contextmanager
+from .system import physical_ram_bytes
 
 
 def utc():
@@ -39,7 +40,7 @@ def check_loadable(path, expansion=6, fraction=0.6):
     Python objects take several times the JSON size; a 5.9 GB run.json once exhausted a 16 GB Mac.
     """
     size = Path(path).stat().st_size
-    ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    ram = physical_ram_bytes()
     if size * expansion > ram * fraction:
         raise MemoryError(
             f"{Path(path).name} is {size / 2**30:.1f} GB; loading it needs about "

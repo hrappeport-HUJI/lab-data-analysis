@@ -13,6 +13,7 @@ from .adapters import get_adapter
 from .colony import ColonyEvents
 from .images import read_frame, quality
 from .storage import Project, utc, write_json, file_digest
+from .system import lower_priority
 from importlib.metadata import version, PackageNotFoundError
 import platform
 import shutil
@@ -82,10 +83,7 @@ def _process_field(job):
     """One field, start to finish. Module level so fields can run in separate processes."""
     p, cfg, segmenter, tracker, baseline_only, directory, n_selected, fi, field, reuse = job
     if __import__("multiprocessing").current_process().name != "MainProcess":
-        try:
-            os.nice(int(cfg.get("worker_nice", WORKER_NICE)))
-        except OSError:
-            pass
+        lower_priority(cfg.get("worker_nice", WORKER_NICE))
     sp, tp = cfg.get("segmentation", {}), cfg.get("tracking", {})
     structural = cfg["structure_channel"]
     observations, edges, founders, qc = [], [], [], []

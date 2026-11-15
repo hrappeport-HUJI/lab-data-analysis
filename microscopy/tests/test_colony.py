@@ -280,7 +280,10 @@ def test_raw_folder_moved_behind_a_symlink_still_reads(tmp_path):
     raw = project.raw
     moved = tmp_path / "moved_raw"
     os.rename(raw, moved)
-    os.symlink(moved, raw)  # data relocated, link left at the recorded raw_root
+    try:
+        os.symlink(moved, raw, target_is_directory=True)  # data relocated, link left at the recorded raw_root
+    except OSError as error:  # Windows needs Developer Mode or admin rights to create symlinks
+        pytest.skip(f"cannot create a symlink here: {error}")
     again = Project(project.root)
     key = next(iter(again.frames))
     assert read_frame(again, *key).shape == tuple(again.frames[key]["shape"])
