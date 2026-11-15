@@ -221,6 +221,14 @@ def _get(url, host=None):
         return e.code, json.loads(e.read())
 
 
+def _get_raw(url, headers=None):
+    try:
+        response = urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=10)
+        return response.status, response.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
 def test_network_mode_needs_allowed_client_and_access_key(project, tmp_path):
     with pytest.raises(ValueError, match="allow-client"):
         WorkbenchServer(project.root, 0, read_only=True, host="0.0.0.0")
@@ -242,8 +250,25 @@ def test_network_mode_needs_allowed_client_and_access_key(project, tmp_path):
         assert status == 200 and session["token"]
         assert _get(f"{base}/api/session?key={key}", host=f"evil.example:{port}")[0] == 403
         assert _get(f"{base}/api/session?key={key}", host=f"pc.example:{port}")[0] == 200
-        status, data = _get(f"http://127.0.0.1:{port}/api/session")  # the PC itself needs no key
-        assert status == 200
+        assert _get(f"http://127.0.0.1:{port}/api/session")[0] == 403  # the PC itself needs the key too
+        assert _get(f"http://127.0.0.1:{port}/api/session?key={key}")[0] == 200
+        # result files need the session (header or cookie), never just a guessed path
+        results = project.root / "results" / "r1"
+        results.mkdir(parents=True, exist_ok=True)
+        (results / "table.csv").write_text("founder,lag")
+        artifact = f"{base}/artifacts/results/r1/table.csv"
+        assert _get_raw(artifact)[0] == 403
+        assert _get_raw(artifact, {"X-Review-Token": session["token"]})[0] == 200
+        assert _get_raw(artifact, {"Cookie": "review_session=" + session["token"]})[0] == 200
+        response = urllib.request.urlopen(base + "/api/session?key=" + key, timeout=10)
+        assert "HttpOnly" in response.headers["Set-Cookie"] and "SameSite=Strict" in response.headers["Set-Cookie"]
+        assert response.headers["Referrer-Policy"] == "no-referrer"
+        # a POST from another site's page is refused even with a valid token
+        hostile = urllib.request.Request(base + "/api/review", method="POST", data=b"{}", headers={
+            "X-Review-Token": session["token"], "Origin": "http://evil.example", "Content-Type": "application/json"})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(hostile, timeout=10)
+        assert e.value.code == 403
         # the key survives a restart, so bookmarked links keep working
         again = WorkbenchServer(project.root, 0, read_only=True, host="0.0.0.0",
                                 allow_clients=[address + "/32"], key_file=key_file)
@@ -261,3 +286,16 @@ def test_network_mode_needs_allowed_client_and_access_key(project, tmp_path):
     finally:
         blocked.shutdown()
         blocked.server_close()
+
+
+def test_bound_to_one_address_links_use_that_address(project, tmp_path):
+    address = _non_loopback_address()
+    if address is None:
+        pytest.skip("no non-loopback network address on this computer")
+    server = WorkbenchServer(project.root, 0, read_only=True, host=address,
+                             allow_clients=[address + "/32"], key_file=tmp_path / "key")
+    try:
+        assert server.origin == f"http://{address}:{server.server_address[1]}"
+        assert all(link.startswith(f"http://{address}:") for link in server.links())
+    finally:
+        server.server_close()

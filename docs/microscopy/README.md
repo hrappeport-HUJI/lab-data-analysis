@@ -65,7 +65,8 @@ python -m microscopy.workbench PROJECT --port 8890 --host 0.0.0.0 \
 
 - `--allow-client` (required, repeatable): the laptop's address, or a network. `100.64.0.0/10` is Tailscale's address range, for review from anywhere through Tailscale.
 - `--allow-host`: extra names the browser may use for the PC, such as its Tailscale name. The PC's own addresses are accepted automatically.
-- The viewer prints one link per address. Each carries an access key (`?key=…`), which is kept in `~/.lab-microscopy/viewer_access_key`, so a bookmarked link survives restarts. Delete that file to revoke old links.
+- The viewer prints one link per address. Each carries an access key (`?key=…`), kept in `~/.lab-microscopy/viewer_access_key` so it survives restarts. The browser remembers the key for that address and removes it from the address bar, so afterwards the plain address works. Delete the key file to revoke access.
+- In network mode the PC's own browser needs the key too, since other accounts may share the PC. Result files (`/artifacts/`) need the session, sent as a header or an HttpOnly cookie.
 - The PC's own firewall must also allow the port: on Windows, an administrator runs `New-NetFirewallRule -DisplayName "Microscopy viewer" -Direction Inbound -Protocol TCP -LocalPort 8890-8899 -RemoteAddress LAPTOP_IP,100.64.0.0/10 -Action Allow`.
 - On a campus network the traffic is plain HTTP, so another computer on that network could in principle read the images and the key. Tailscale traffic is encrypted.
 
