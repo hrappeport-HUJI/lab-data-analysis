@@ -162,7 +162,7 @@ def statistics(data, figure, *settings, **overrides):
     rows, removed = [], []
     for condition in _conditions(data, s, figure):
         used, extra, out = _select(data.founders, condition, x, y, s)
-        removed.append(out.assign(figure=figure))
+        removed.extend(out.id.tolist())
         seed = int(hashlib.sha256(f"{figure}/{condition}".encode()).hexdigest()[:8], 16)
         rho, p = _permutation_rho(used[x].to_numpy(), used[y].to_numpy(), seed)
         fit = theilslopes(used[y], used[x]) if len(used) >= 3 and used[x].nunique() > 1 else None
@@ -175,7 +175,7 @@ def statistics(data, figure, *settings, **overrides):
         prev = max(prev, min(1, r["p"] * (len(valid) - i))); r["p_holm"] = prev
     table = pd.DataFrame(rows)
     table["p_holm"] = [r.get("p_holm", np.nan) for r in rows]
-    table.attrs["removed"] = pd.concat(removed) if removed else pd.DataFrame()
+    table.attrs["removed_ids"] = removed  # plain list: pandas compares attrs when combining tables
     return table
 
 
@@ -290,7 +290,8 @@ def _finish(fig, s):
 def plot(data, figure, *settings, **overrides):
     """Draw one figure (a key of FIGURES): one panel per group of conditions, marginal histograms.
 
-    Returns the statistics table; ``table.attrs["removed"]`` lists founders dropped as outliers."""
+    Returns the statistics table; ``table.attrs["removed_ids"]`` lists founders dropped as outliers
+    (``removed_outliers`` turns several tables into one founder table)."""
     s = _settings(settings, overrides)
     x, y = FIGURES[figure]
     zone = {**LINEAR_ZONE, **(s["log_linear_zone"] or {})}
@@ -377,6 +378,13 @@ def plot(data, figure, *settings, **overrides):
         ax.set_xlabel(VARIABLES[x], fontsize=8.5, color=INK); ax.set_ylabel(VARIABLES[y], fontsize=8.5, color=INK)
     _finish(fig, s)
     return stats
+
+
+def removed_outliers(data, tables):
+    """Founders dropped as outliers by any of the given statistics tables, one row per figure."""
+    rows = [data.founders[data.founders.id.isin(t.attrs.get("removed_ids", []))].assign(figure=t.figure.iloc[0])
+            for t in tables if len(t)]
+    return pd.concat(rows, ignore_index=True) if rows else data.founders.iloc[:0]
 
 
 # ============================================================ YFP histograms

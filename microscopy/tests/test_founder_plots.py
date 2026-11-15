@@ -60,5 +60,8 @@ def test_every_figure_draws_and_settings_override(result, tmp_path):
     with_non = fp.plot(d, "initial_PI_vs_lag", common, dict(include_non_dividers=True))
     assert (with_non.n_not_shown_in_stats > 0).all()
     assert fp.yfp_histograms(d, common, times_h=[0, 1.5, 40]) [-1] is None
+    tables = [fp.plot(d, f, common) for f in ("initial_PI_vs_lag", "PI_rate_vs_lag")]
+    pd.concat(tables)  # combining tables must work
+    assert set(fp.removed_outliers(d, tables).columns) >= {"id", "figure"}
     with pytest.raises(ValueError, match="Unknown setting"):
         fp.plot(d, "initial_PI_vs_lag", common, dict(typo=1))
