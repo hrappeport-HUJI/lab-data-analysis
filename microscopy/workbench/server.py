@@ -24,6 +24,7 @@ from ..storage import Conflict
 
 WEB = Path(__file__).parent / "web"
 STATIC = {"/": "index.html", "/viewer.js": "viewer.js", "/style.css": "style.css", "/manual_ui.js": "manual_ui.js"}
+STATIC_TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/css"}
 WINDOWS = {"auto", "128", "192", "256", "384", "512", "768", "1024", "2048"}
 
 
@@ -224,7 +225,8 @@ class Handler(BaseHTTPRequestHandler):
             if path not in STATIC:
                 return self.send(404, {"error": "Not found"})
             target = WEB / STATIC[path]
-            ctype = mimetypes.guess_type(target.name)[0] or "text/plain"
+            # explicit: Windows' registry often maps .js to text/plain, and browsers then refuse the script
+            ctype = STATIC_TYPES.get(target.suffix, "text/plain")
             return self.send(200, target.read_bytes(), ctype + "; charset=utf-8")
         except (BrokenPipeError, ConnectionResetError):
             pass
