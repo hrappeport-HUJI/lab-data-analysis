@@ -142,7 +142,14 @@ def _bounded_results(pool, function, jobs, limit):
         fill()
 
 
-def _frame_jobs(plans, reuse):
+def _frame_jobs(plans, reuse, interleave=True):
+    """Frame tasks. Interleaved across fields for the parallel pool; field by field (the original order,
+    which stateful custom segmenters rely on) for the serial path."""
+    if not interleave:
+        for fi, plan in enumerate(plans):
+            for record in plan["records"]:
+                yield fi, plan["field"], record, plan["parameters"], reuse.get(plan["field"])
+        return
     queues = deque((fi, plan, iter(plan["records"])) for fi, plan in enumerate(plans))
     while queues:
         fi, plan, records = queues.popleft()
@@ -249,6 +256,7 @@ def _follow_field(job):
 
     for record in records:
         frame = record["frame"]
+        check_disk(directory)  # stop resumably if free space runs low while replaying
         prepared = json.loads(_sidecar(directory, fi, frame).read_text())
         if prepared["schema_version"] != 1:
             raise ValueError("Unknown prepared-frame schema")
@@ -436,7 +444,7 @@ def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=Fal
                        partial(_prepare_frame, state=(p, cfg, segmenter, directory)))
             counts = [0] * len(plans)
             for fi, frame in _bounded_results(field_pool, prepare,
-                                              _frame_jobs(plans, reuse), 2 * frame_workers):
+                                              _frame_jobs(plans, reuse, interleave=workers > 1), 2 * frame_workers):
                 counts[fi] += 1
                 write_json(directory / "progress" / f"segmented-{fi:04}.json",
                            {"field": selected[fi], "frame": frame, "segmented": counts[fi],
@@ -476,6 +484,7 @@ def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=Fal
         write_json(directory / "timing.json", {"segmentation_s": segmentation_s,
                    "replay_s": replay_s, "workers": workers, "field_workers": field_workers})
         validate_graph(observations, edges)
+        check_disk(directory)  # room for run.json before publishing it
         try:
             commit = subprocess.check_output(
                 ["git", "-C", str(Path(__file__).parent), "rev-parse", "HEAD"],

@@ -104,3 +104,27 @@ def test_atomic_json_retries_windows_reader_and_cleans_up(tmp_path, monkeypatch)
     with pytest.raises(PermissionError, match="persistent"):
         storage.write_json(tmp_path/'progress.json', {"done": 3})
     assert not list(tmp_path.glob('.write-*'))
+
+
+def test_serial_path_keeps_fields_contiguous_for_stateful_segmenters():
+    plans = [{'field': f, 'records': list(range(n)), 'parameters': {}} for f, n in [('a', 3), ('b', 2)]]
+    order = [(j[1], j[2]) for j in _frame_jobs(plans, {}, interleave=False)]
+    assert order == [('a', 0), ('a', 1), ('a', 2), ('b', 0), ('b', 1)]
+
+
+def test_replay_stops_resumably_when_disk_runs_low(tmp_path, monkeypatch):
+    import pytest
+    import microscopy.pipeline as pipeline
+    p = create(tmp_path / 'demo')
+    p.config['tracking']['events'] = 'colony'
+    real = pipeline.free_disk_gb
+    def shrinking(path):
+        # plenty while segmenting; runs out once the run reports the replay phase
+        status = sorted((p.root / 'runs').glob('run-*/status.json'), key=lambda f: f.stat().st_mtime)
+        in_replay = bool(status) and '"replay"' in status[-1].read_text()
+        return 0.5 if in_replay else real(path)
+    monkeypatch.setattr(pipeline, 'free_disk_gb', shrinking)
+    with pytest.raises(RuntimeError, match='Not enough free disk'):
+        run(p)
+    runs = sorted((p.root / 'runs').glob('run-*'), key=lambda d: d.stat().st_mtime)
+    assert runs and not (runs[-1] / 'run.json').exists()
