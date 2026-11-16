@@ -85,9 +85,18 @@ def label_image(project, run_id, node):
     return _labels(str(path), stat.st_mtime_ns, stat.st_size)
 
 
+# Operations that change the run's observations, edges or founders in place. Only these need a private
+# deep copy of the run; event decisions, quality flags and measurement frames are kept in new containers.
+STRUCTURAL_OPERATIONS = {"set_mask", "split_founder", "add_observation", "set_links"}
+
+
 def materialize(project, run_id, operations):
     original = project.load_run(run_id)
-    data = copy.deepcopy(original)
+    if any(op.get("type") in STRUCTURAL_OPERATIONS for op in operations):
+        data = copy.deepcopy(original)
+    else:
+        # Copying a large run (every outline of every frame) took ~7 s per save on a 34-position run.
+        data = dict(original)
     nodes = {r["id"]: r for r in data["observations"]}
     founders = {r["id"]: r for r in data["founders"]}
     data.update(
