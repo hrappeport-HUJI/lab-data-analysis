@@ -19,3 +19,4 @@ A background job is not "running" until you have seen it make progress. After la
 3. Scripts that call `microscopy.pipeline.run` with `field_workers > 1` must put the call under `if __name__ == "__main__":`. Worker processes re-import the script.
 4. Check memory and disk before heavy jobs, and run them at lower priority. Never auto-chain a heavy step without checking what the previous step produced. Microscopy runs now refuse to start or continue below 3 GB of free disk, and refuse to load a run file too large for this computer's RAM.
 5. Keep project copies and runs outside temporary or session scratch folders, which can be wiped.
+6. Start servers and multi-hour jobs as detached processes, not as background tasks of an agent session: a session restart stops those. On the Windows lab PC use a `.ps1` launcher with `Start-Process`; see `docs/microscopy/lab_pc_notes.md`, which also lists the Windows-specific traps found so far.
