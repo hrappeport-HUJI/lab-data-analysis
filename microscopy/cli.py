@@ -14,6 +14,12 @@ def main(argv=None):
     s.add_argument("folder")
     s.add_argument("--config-template")
     s = sub.add_parser(
+        "mm-metadata",
+        help="Write the metadata table (times, exposures) from Micro-Manager metadata.txt files",
+    )
+    s.add_argument("folder")
+    s.add_argument("--output", required=True)
+    s = sub.add_parser(
         "init", help="Hash and index an explicitly configured acquisition"
     )
     s.add_argument("folder")
@@ -53,6 +59,10 @@ def main(argv=None):
                 if Path(args.config_template).exists():
                     raise ValueError("Configuration already exists")
                 write_json(args.config_template, template())
+        elif args.command == "mm-metadata":
+            from .micromanager import build_table
+
+            result = build_table(args.folder, args.output)
         elif args.command == "init":
             from .importing import initialize
 
