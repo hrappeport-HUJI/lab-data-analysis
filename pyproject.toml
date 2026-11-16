@@ -22,4 +22,4 @@ include = ["microscopy*"]
 microscopy = ["web/*.html", "web/*.js", "web/*.css", "workbench/web/*.html", "workbench/web/*.js", "workbench/web/*.css"]
 
 [tool.pytest.ini_options]
-testpaths = ["microscopy/tests", "plate_reader/tests"]
+testpaths = ["microscopy/tests", "plate_reader/tests", "skills/data-viewer/tests"]

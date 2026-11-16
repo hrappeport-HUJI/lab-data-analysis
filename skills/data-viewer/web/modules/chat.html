@@ -1,0 +1,13 @@
+    <div class="card" id="chat-card">
+      <div class="chat-bar">
+        <h2 style="margin:0">Ask about the data</h2>
+        <label style="font-size:12px;color:var(--muted)">Model
+          <select id="tier" aria-label="Model"><option value="quick">fast</option><option value="default">thorough</option></select></label>
+      </div>
+      <p class="hint" id="chat-hint">For questions the controls can't answer: summaries by group, particular rows, other tests, or "show me X vs Y for these groups". It computes from the full table through the page and can change the plot. Uses your Claude account.</p>
+      <div class="chat-log" id="chat-log" aria-live="polite"></div>
+      <div class="chat-in">
+        <textarea id="chat-text" rows="2" placeholder="Ask a question about this table" aria-label="Question"></textarea>
+        <div style="display:grid;gap:6px"><button class="btn" id="chat-send" type="button">Ask</button><button class="btn" id="chat-stop" type="button" hidden>Stop</button></div>
+      </div>
+    </div>

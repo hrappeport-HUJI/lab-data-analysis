@@ -87,3 +87,12 @@ The [microscopy-experiment skill](skills/microscopy-experiment/SKILL.md) lives i
 ```sh
 python -m pytest microscopy/tests plate_reader/tests
 ```
+
+## Data viewer
+
+The [data-viewer skill](skills/data-viewer/SKILL.md) turns any results table into an interactive page: a scatter with histograms on the sides, filters, live statistics, preset and saved views. The page opens by double-click on any computer and can be emailed. Optional modules add links from a point to its source data and a chat box. The skill folder holds the builder, the page and its tests, and can be copied into a skills directory as it is.
+
+```sh
+python skills/data-viewer/build_viewer.py build table.csv spec.json viewer.html
+python -m pytest skills/data-viewer/tests
+```

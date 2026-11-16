@@ -1,0 +1,10 @@
+/* chat module */
+.chat-log { display: grid; gap: 8px; max-height: 360px; overflow-y: auto; padding-right: 4px; }
+.msg { font-size: 13px; line-height: 1.5; padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.you { background: var(--you); justify-self: end; max-width: 85%; }
+.msg.bot { background: var(--chip); }
+.msg.tool { font-family: var(--mono); font-size: 11.5px; color: var(--muted); background: transparent; padding: 0 10px; }
+.chat-in { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; margin-top: 10px; }
+.chat-in textarea { resize: vertical; min-height: 40px; }
+.chat-bar { display: flex; gap: 8px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.chat-bar select { width: auto; }
