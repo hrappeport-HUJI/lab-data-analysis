@@ -110,7 +110,7 @@ A realistic target might be 10–15 min for a Pilot_3-sized experiment.
 - The experiment scripts are Mac-only:
   - `run_colony.py` calls macOS `memory_pressure` and has Mac paths;
   - the viewer launcher is a zsh `.command` file.
-- `environment-scripthub.yml` targets the M1 Mac. The PC needs its own environment (CUDA PyTorch if a GPU model is used). Prefer native Windows over WSL2 for data on E:, because WSL2 reads Windows drives slowly.
+- `environment.yml` targets the M1 Mac. The PC needs its own environment (CUDA PyTorch if a GPU model is used). Prefer native Windows over WSL2 for data on E:, because WSL2 reads Windows drives slowly.
 - Worker processes are spawned, not forked, so keep pipeline calls under `if __name__ == "__main__":` (see `AGENTS.md`).
 
 ## Training data: what exists

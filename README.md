@@ -4,8 +4,9 @@ Code for analyses that repeat across experiments. It holds code only.
 
 | What | Where |
 |---|---|
-| Code | This repo, cloned to `~/Research/lab-data-analysis` |
-| Data: raw files, plate maps, notebooks and results of each experiment | `~/PycharmProjects/ScriptHub/ReaderPlot/YYYY_MM_DD_name/`, backed up on Google Drive |
+| Code | This repo, cloned to `~/Research/Code/lab-data-analysis` |
+| Data: raw files, plate maps, notebooks and results of each experiment | `~/Research/Raw_data/YYYY-MM-DD <description>/`, backed up on Google Drive |
+| Tools for the raw-data folders (index, deep archive) | `raw_data/` |
 | How to run an analysis, and what to ask first | Skills in the Zettelkasten: `Library/Skills/` |
 | What an experiment was and what it showed | Experiment notes in the Zettelkasten: `Library/LabNotebook/Experiments/` |
 
@@ -48,7 +49,7 @@ git remote add scanlag-upstream https://github.com/alongutf/scanlag_analyser  # 
 git subtree pull --prefix=scanlag_analyser scanlag-upstream master
 ```
 
-To analyze a run, give an agent the `scanlag-experiment` skill (`Library/Skills/scanlag-experiment/` in the Zettelkasten), or follow it yourself: `scripts/inspect_scans.py` checks the scans and time zero, `scripts/check_density.py` finds TNTC plates, `scripts/scanlag_pipeline.py` segments and tracks, and `scripts/scanlag_analysis.py` draws the histograms. On Hagai's Mac it runs in the `ScriptHub` env (`environment-scripthub.yml` at the repo root, which also covers `plate_reader`), with the U-Net on the Apple GPU.
+To analyze a run, give an agent the `scanlag-experiment` skill (`Library/Skills/scanlag-experiment/` in the Zettelkasten), or follow it yourself: `scripts/inspect_scans.py` checks the scans and time zero, `scripts/check_density.py` finds TNTC plates, `scripts/scanlag_pipeline.py` segments and tracks, and `scripts/scanlag_analysis.py` draws the histograms. On Hagai's Mac it runs in the `research` env (`environment.yml` at the repo root, which also covers `plate_reader` and `microscopy`), with the U-Net on the Apple GPU.
 
 Tests:
 
