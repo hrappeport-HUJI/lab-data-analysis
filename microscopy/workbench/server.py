@@ -10,15 +10,21 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import csv
 import io
+import ipaddress
 import json
 import mimetypes
 import secrets
+import socket
+from http.cookies import SimpleCookie
+
+SESSION_COOKIE = "review_session"
 
 from .adapter import RunReviewModel
 from ..storage import Conflict
 
 WEB = Path(__file__).parent / "web"
 STATIC = {"/": "index.html", "/viewer.js": "viewer.js", "/style.css": "style.css", "/manual_ui.js": "manual_ui.js"}
+STATIC_TYPES = {".html": "text/html", ".js": "text/javascript", ".css": "text/css"}
 WINDOWS = {"auto", "128", "192", "256", "384", "512", "768", "1024", "2048"}
 
 
@@ -37,19 +43,78 @@ def load_tagging_sets(path, fields):
     return sets
 
 
+LOOPBACK = ("127.0.0.1", "localhost")
+KEY_FILE = Path.home() / ".lab-microscopy" / "viewer_access_key"
+
+
+def access_key(path=KEY_FILE):
+    """Access key for network mode, kept between runs so a bookmarked link keeps working."""
+    path = Path(path)
+    if path.exists():
+        key = path.read_text().strip()
+        if len(key) >= 32:
+            return key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = secrets.token_urlsafe(32)
+    path.write_text(key)
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    return key
+
+
+def local_addresses():
+    """This computer's own IPv4 addresses and host name, used to accept requests addressed to it."""
+    names = {socket.gethostname().lower()}
+    try:
+        names |= {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+    except OSError:
+        pass
+    return names
+
+
 class WorkbenchServer(ThreadingHTTPServer):
+    """Loopback-only by default. With ``host`` set to a network address, the viewer is reachable
+    from the networks in ``allow_clients`` and requires an access key in the link."""
+
     daemon_threads = True
 
-    def __init__(self, project, port=0, run_id=None, read_only=False, tagging_sets=None):
-        self.model = RunReviewModel(project, run_id, read_only=read_only)
+    def __init__(self, project, port=0, run_id=None, read_only=False, tagging_sets=None,
+                 host="127.0.0.1", allow_clients=(), allow_hosts=(), key_file=KEY_FILE, image_format="png"):
+        self.network = host not in LOOPBACK
+        if self.network and not allow_clients:
+            raise ValueError("Serving on the network needs --allow-client (the Mac's address or a network such as 100.64.0.0/10)")
+        self.allow_clients = [ipaddress.ip_network(c, strict=False) for c in allow_clients]
+        self.model = RunReviewModel(project, run_id, read_only=read_only, image_format=image_format)
         self.model.state()  # fail early on an unreadable run or review store
         self.tagging_sets = load_tagging_sets(tagging_sets, self.model.fields)
         self.token = secrets.token_urlsafe(32)
-        super().__init__(("127.0.0.1", port), Handler)
+        self.access_key = access_key(key_file) if self.network else None
+        super().__init__((host, port), Handler)
+        self.host = host
+        names = set(LOOPBACK) | {h.lower() for h in allow_hosts}
+        if self.network:
+            names |= local_addresses() if host == "0.0.0.0" else {host}
+        self.host_names = names
 
     @property
     def origin(self):
-        return f"http://127.0.0.1:{self.server_address[1]}"
+        """Address for a browser on this PC: loopback unless the server is bound to one specific address."""
+        local = "127.0.0.1" if self.host in ("0.0.0.0",) + LOOPBACK else self.host
+        return f"http://{local}:{self.server_address[1]}"
+
+    def links(self):
+        """Addresses to open the viewer at (network mode: each with the access key)."""
+        port = self.server_address[1]
+        if not self.network:
+            return [f"{self.origin}/"]
+        hosts = sorted(h for h in self.host_names if h not in LOOPBACK or self.host == "0.0.0.0")
+        return [f"http://{h}:{port}/?key={self.access_key}" for h in hosts]
+
+    def client_allowed(self, address):
+        ip = ipaddress.ip_address(address)
+        return ip.is_loopback or any(ip in net for net in self.allow_clients)
 
     def server_close(self):
         super().server_close()
@@ -66,16 +131,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def guards(self, api=False):
         port = self.server.server_address[1]
-        allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
-        if self.headers.get("Host") not in allowed:
-            raise PermissionError("Only the loopback address is accepted")
+        if not self.server.client_allowed(self.client_address[0]):
+            raise PermissionError("This computer is not allowed to use the viewer")
+        allowed = {f"{h}:{port}" for h in self.server.host_names}
+        if (self.headers.get("Host") or "").lower() not in allowed:
+            raise PermissionError("Requests must address this viewer by one of its own names")
         origin = self.headers.get("Origin")
-        if origin and origin not in {f"http://{v}" for v in allowed}:
+        if origin and origin.lower() not in {f"http://{v}" for v in allowed}:
             raise PermissionError("Cross-origin requests are not permitted")
-        if api and urlparse(self.path).path != "/api/session" and not secrets.compare_digest(
-            self.headers.get("X-Review-Token", ""), self.server.token
-        ):
+        path = urlparse(self.path).path
+        if api and path == "/api/session" and self.server.network:
+            # In network mode the PC's own address needs the key too: other accounts may share the PC.
+            key = parse_qs(urlparse(self.path).query).get("key", [""])[0]
+            if not secrets.compare_digest(key, self.server.access_key):
+                raise PermissionError("Missing or wrong access key: open the full link printed when the viewer started")
+        if api and path != "/api/session" and not self.has_token():
             raise PermissionError("Missing review-session token")
+
+    def has_token(self):
+        """The session token, from the X-Review-Token header or (for images and links) the session cookie."""
+        header = self.headers.get("X-Review-Token", "")
+        if header and secrets.compare_digest(header, self.server.token):
+            return True
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        value = cookie[SESSION_COOKIE].value if SESSION_COOKIE in cookie else ""
+        return bool(value) and secrets.compare_digest(value, self.server.token)
 
     def send(self, status, data, ctype="application/json", headers=None):
         body = json.dumps(data, allow_nan=False).encode() if ctype == "application/json" and not isinstance(data, bytes) else data
@@ -84,6 +164,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
         for k, v in (headers or {}).items():
             self.send_header(k, str(v))
         self.end_headers()
@@ -103,10 +184,12 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path
             q = {k: v[0] for k, v in parse_qs(parsed.query).items()}
-            self.guards(path.startswith("/api/"))
+            self.guards(path.startswith("/api/") or path.startswith("/artifacts/"))
             if path == "/api/session":
+                cookie = f"{SESSION_COOKIE}={self.server.token}; Path=/; HttpOnly; SameSite=Strict"
                 return self.send(200, {"token": self.server.token, "project_id": self.m.config()["project_id"],
-                                       "project_path": str(self.m.root), "viewer_version": "4-run-adapter"})
+                                       "project_path": str(self.m.root), "viewer_version": "4-run-adapter"},
+                                 headers={"Set-Cookie": cookie})
             if path == "/api/project":
                 st = self.m.state()
                 return self.send(200, {
@@ -142,7 +225,8 @@ class Handler(BaseHTTPRequestHandler):
             if path not in STATIC:
                 return self.send(404, {"error": "Not found"})
             target = WEB / STATIC[path]
-            ctype = mimetypes.guess_type(target.name)[0] or "text/plain"
+            # explicit: Windows' registry often maps .js to text/plain, and browsers then refuse the script
+            ctype = STATIC_TYPES.get(target.suffix, "text/plain")
             return self.send(200, target.read_bytes(), ctype + "; charset=utf-8")
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -178,7 +262,8 @@ class Handler(BaseHTTPRequestHandler):
             auto_contrast=q.get("contrast") == "auto",
         )
         self.m.prefetch(record, frame, channel)
-        self.send(200, png, "image/png", {"X-Frame-Meta": json.dumps(meta)})
+        ctype = "image/jpeg" if self.m.image_format == "jpeg" else "image/png"
+        self.send(200, png, ctype, {"X-Frame-Meta": json.dumps(meta)})
 
     def do_POST(self):
         try:
@@ -210,12 +295,23 @@ class Handler(BaseHTTPRequestHandler):
             self.error(e)
 
 
-def serve(project, port=0, run_id=None, read_only=False, open_browser=False, tagging_sets=None):
-    server = WorkbenchServer(project, port, run_id, read_only=read_only, tagging_sets=tagging_sets)
-    print(f"Founder review ({'read-only preview' if read_only else 'editable'}): {server.origin}/", flush=True)
+def serve(project, port=0, run_id=None, read_only=False, open_browser=False, tagging_sets=None,
+          host="127.0.0.1", allow_clients=(), allow_hosts=(), image_format="png"):
+    server = WorkbenchServer(project, port, run_id, read_only=read_only, tagging_sets=tagging_sets,
+                             host=host, allow_clients=allow_clients, allow_hosts=allow_hosts,
+                             image_format=image_format)
+    mode = "read-only preview" if read_only else "editable"
+    if server.network:
+        print(f"Founder review ({mode}), for this PC and " + ", ".join(allow_clients) + ". Open one of:", flush=True)
+        for link in server.links():
+            print("  " + link, flush=True)
+        print("After the first visit the browser remembers the key; the plain address then works too.", flush=True)
+    else:
+        print(f"Founder review ({mode}): {server.origin}/", flush=True)
     if open_browser:
         import webbrowser
-        webbrowser.open(server.origin + "/")
+        local = server.origin + "/" + (f"?key={server.access_key}" if server.network else "")
+        webbrowser.open(local)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
