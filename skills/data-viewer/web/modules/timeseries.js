@@ -1,4 +1,4 @@
-// timeseries: stacked curve panels under the scatter; the picked row is highlighted in every panel.
+// timeseries: stacked curve panels under the scatter; highlighted rows (state.selected) are highlighted in every panel.
 // features.timeseries = {
 //   series:   {series_id: {channel: {t: [...], v: [...]}}},       // one entry per measured object (a well, a cell, ...)
 //   channels: {channel: {label: "OD630, background subtracted", scale: "log"}},
@@ -30,9 +30,9 @@ TS.init = cfg => {
   nsel.innerHTML = Array.from({ length: max }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join("");
   nsel.onchange = () => { TS.n = +nsel.value; TS.save(); TS.controls(); TS.draw(); };
   const fade = document.getElementById("ts-fade"); fade.onchange = () => { TS.fade = fade.checked; TS.save(); TS.draw(); };
-  document.getElementById("ts-clear").onclick = () => showPick(null);
+  document.getElementById("ts-clear").onclick = () => setSelection([]);
   TS.controls(); TS.draw();
-  document.getElementById("ts-plot").on("plotly_click", ev => { const p = ev.points && ev.points[0]; if (p && p.data && p.data.meta != null) showPick(ROWS[p.data.meta]); });
+  document.getElementById("ts-plot").on("plotly_click", ev => { const p = ev.points && ev.points[0]; if (p && p.data && p.data.meta != null) clickRow(ROWS[p.data.meta], ev.event); });
 };
 
 TS.controls = () => {
@@ -69,28 +69,32 @@ TS.draw = () => {
     layout["yaxis" + ax] = { domain: [top - h, top], anchor: "x" + ax, type: c.scale === "log" ? "log" : "linear", title: { text: (TS.cfg.channels[c.channel] || {}).label || c.channel, font: { size: 11.5 } },
       gridcolor: line, linecolor: muted, showline: true, zeroline: false, ticks: "outside", tickcolor: muted, exponentformat: "power" };
     annotations.push({ xref: "paper", yref: "paper", x: 0, y: top, yanchor: "bottom", xanchor: "left", showarrow: false, text: `<b>${i + 1}. ${d.name}</b>`, font: { size: 12, color: ink } });
-    const seen = new Set(), pickedSid = picked ? picked[d.series_col] : null, mine = [];
+    const SEL = state.selected, hlRows = ROWS.filter(r => SEL.has(r.id) && passFilters(r) && !state.excluded.has(r.id));
+    const hlBySid = new Map(hlRows.map(r => [r[d.series_col], r])), seen = new Set(), mine = [];
     for (const r of rows) {
       const sid = r[d.series_col]; if (sid == null || seen.has(sid)) continue; seen.add(sid);
       const s = ((TS.cfg.series || {})[sid] || {})[c.channel]; if (!s) continue;
-      const off = c.x === "absolute" ? 0 : r[(d.events || {})[c.x]]; if (off == null) continue;
-      const isP = pickedSid != null && sid === pickedSid, faded = picked && TS.fade && !isP;
+      const hr = hlBySid.get(sid), isP = !!hr, faded = SEL.size > 0 && TS.fade && !isP;
+      const rr = isP ? hr : r, off = c.x === "absolute" ? 0 : rr[(d.events || {})[c.x]]; if (off == null) continue;
       const col = colorOf(state.colorBy, r[state.colorBy]);
-      const tr = { type: "scattergl", mode: "lines", xaxis: "x" + ax, yaxis: "y" + ax, x: s.t.map(t => t - off), y: s.v, meta: (isP ? picked : r).i,
+      const tr = { type: "scattergl", mode: "lines", xaxis: "x" + ax, yaxis: "y" + ax, x: s.t.map(t => t - off), y: s.v, meta: (isP ? hr : r).i,
         line: { color: faded ? hexA(col, .16) : col, width: isP ? 3.2 : 1.2 }, opacity: faded ? 1 : (isP ? 1 : .8),
-        hovertemplate: `<b>${label(isP ? picked : r)}</b><br>${sid}<br>%{x:.2f} h, %{y:.4g}<extra></extra>` };
+        hovertemplate: `<b>${label(isP ? hr : r)}</b><br>${sid}<br>%{x:.2f} h, %{y:.4g}<extra></extra>` };
       (isP ? mine : traces).push(tr);
     }
-    traces.push(...mine);  // the picked curve on top
-    if (picked) for (const [e, col] of Object.entries(d.events || {})) {
-      const t = picked[col]; if (t == null) continue; const off = c.x === "absolute" ? 0 : picked[(d.events || {})[c.x]]; if (off == null) continue;
+    traces.push(...mine);  // highlighted curves on top
+    const drawn = new Set();  // one dashed line per distinct event time of the highlighted rows
+    for (const hr of hlRows) for (const [e, col] of Object.entries(d.events || {})) {
+      const t = hr[col]; if (t == null) continue; const off = c.x === "absolute" ? 0 : hr[(d.events || {})[c.x]]; if (off == null) continue;
+      const key = e + ":" + (t - off).toFixed(2); if (drawn.has(key)) continue; drawn.add(key);
       shapes.push({ type: "line", xref: "x" + ax, x0: t - off, x1: t - off, yref: "paper", y0: top - h, y1: top, line: { color: accent, width: 1.2, dash: "dash" } });
       annotations.push({ xref: "x" + ax, x: t - off, yref: "paper", y: top, yanchor: "top", xanchor: "left", showarrow: false, text: " " + e, font: { size: 10.5, color: accent } });
     }
   }
   const hint = document.getElementById("ts-hint");
   hint.dataset.base = hint.dataset.base || hint.textContent;
-  hint.textContent = (picked ? `Highlighted: ${label(picked)}. ` : "") + hint.dataset.base;
+  const nh = state.selected.size;
+  hint.textContent = (nh === 1 ? `Highlighted: ${label(ROWS.find(r => state.selected.has(r.id)))}. ` : nh ? `${nh} rows highlighted. ` : "") + hint.dataset.base;
   Plotly.react("ts-plot", traces, layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"], toImageButtonOptions: { format: "svg", filename: "curves" } });
 };
 

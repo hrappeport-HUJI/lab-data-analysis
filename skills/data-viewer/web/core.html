@@ -108,9 +108,17 @@ td.name { font-family: var(--sans); font-size: 12.5px; }
       <label><input type="checkbox" id="limfilter"> Statistics use only points inside the limits</label>
       <label><input type="checkbox" id="showexcl" checked> Show removed points as grey crosses</label>
       <label><input type="checkbox" id="trend" checked> Trend lines (linear axes)</label>
-      <p class="hint">Click a point to see all its values (it is ringed); you can remove it from the plot and the statistics there.</p>
+      <p class="hint">Click a point to see all its values; you can remove it from the plot and the statistics there.</p>
+    </fieldset>
+    <fieldset><legend>Highlight</legend>
+      <p class="hint" style="margin:0">Click a point to highlight it; click it again to clear. Shift-, Ctrl- or ⌘-click adds or removes points. Esc clears.</p>
+      <div class="row2"><select id="hl-col" aria-label="Highlight a group: column"></select><select id="hl-val" aria-label="Highlight a group: value"></select></div>
+      <div class="row2"><button class="btn" id="hl-set" type="button">Highlight group</button><button class="btn" id="hl-add" type="button">Add group</button></div>
+      <label><input type="checkbox" id="fade" checked> Fade the other points</label>
+      <div class="row2"><span class="count" id="hl-count"></span><button class="btn" id="hl-clear" type="button">Clear highlight</button></div>
     </fieldset>
     <fieldset><legend>Histograms</legend>
+      <label><input type="checkbox" id="showhist" checked> Show marginal histograms</label>
       <div class="seg" role="group" aria-label="Histogram layout">
         <button type="button" data-hist="lanes" aria-pressed="true">Lane per group</button>
         <button type="button" data-hist="overlay" aria-pressed="false">Overlaid</button>
@@ -126,7 +134,7 @@ td.name { font-family: var(--sans); font-size: 12.5px; }
   <main class="stack">
     <div class="card">
       <div id="plot"></div>
-      <p class="hint">Histograms: fraction of each group, same scale in every lane; solid line = median, dotted = mean. Drag to zoom (sets the limits), double-click to reset, the camera icon saves an SVG.</p>
+      <p class="hint"><span id="hist-hint">Histograms: fraction of each group, same scale in every lane; solid line = median, dotted = mean. </span>Drag to zoom (sets the limits), double-click to reset, the camera icon saves an SVG.</p>
       <div class="note" id="note"></div>
       <div class="pick" id="pick" hidden></div>
     </div>
@@ -175,7 +183,7 @@ function hook(h, ...args) { for (const m of MODULES) if (m[h]) try { m[h](m.cfg,
 const first = (S.views || [])[0] || {};
 const state = { x: first.x || NUM[0], y: first.y || NUM[1] || NUM[0], scale: { x: "linear", y: "linear" }, lim: { x: [null, null], y: [null, null] },
   colorBy: first.color_by || S.color_by || CAT[0], filters: {}, outliers: true, fence: 3, band: false, limfilter: false, showexcl: true, trend: true,
-  hist: "lanes", bins: 22, excluded: new Set() };
+  hist: "lanes", bins: 22, showhist: S.histograms !== false, fade: true, excluded: new Set(), selected: new Set() };
 (S.filters || []).forEach(c => state.filters[c] = new Set(COLS[c].order));
 try { JSON.parse(localStorage.getItem(STORE + ":excluded") || "[]").forEach(k => state.excluded.add(k)); } catch (e) {}
 const saveExcluded = () => { try { localStorage.setItem(STORE + ":excluded", JSON.stringify([...state.excluded])); } catch (e) {} };
@@ -185,13 +193,13 @@ function applyView(v) {
   if (v.y && COLS[v.y]) { state.y = v.y; state.scale.y = v.y_scale || COLS[v.y].scale || "linear"; state.lim.y = v.y_limits ? [...v.y_limits] : [null, null]; }
   if (v.color_by && COLS[v.color_by]) state.colorBy = v.color_by;
   if (v.filters) for (const [c, vals] of Object.entries(v.filters)) if (state.filters[c]) state.filters[c] = new Set(vals.filter(x => COLS[c].order.includes(x)));
-  for (const k of ["outliers", "band", "limfilter", "showexcl", "trend", "hist", "bins", "fence"]) if (v[k] !== undefined) state[k] = v[k];
+  for (const k of ["outliers", "band", "limfilter", "showexcl", "trend", "hist", "bins", "fence", "showhist"]) if (v[k] !== undefined) state[k] = v[k];
 }
 function viewOf() {
   return { x: state.x, y: state.y, x_scale: state.scale.x, y_scale: state.scale.y,
     x_limits: state.lim.x.some(v => v != null) ? state.lim.x : undefined, y_limits: state.lim.y.some(v => v != null) ? state.lim.y : undefined,
     color_by: state.colorBy, filters: Object.fromEntries(Object.entries(state.filters).map(([c, s]) => [c, [...s]])),
-    outliers: state.outliers, band: state.band, hist: state.hist };
+    outliers: state.outliers, band: state.band, hist: state.hist, showhist: state.showhist };
 }
 applyView(first);
 
@@ -329,7 +337,8 @@ function draw() {
   const inLim = r => { const a = Tx.f(r[state.x]), b = Ty.f(r[state.y]); return a >= x0 && a <= x1 && b >= y0 && b <= yData1; };
   const traces = [], shapes = [], annotations = [];
   const n = groups.length, lanes = state.hist === "lanes" && n > 1;
-  const mainX = [0, .80], mainY = [0, .74], topY = [.78, 1], sideX = [.83, 1];
+  const mainX = state.showhist ? [0, .80] : [0, 1], mainY = state.showhist ? [0, .74] : [0, 1], topY = [.78, 1], sideX = [.83, 1];
+  const SEL = state.selected, dim = r => SEL.size > 0 && state.fade && !SEL.has(r.id);
   const layout = { margin: { l: 64, r: 10, t: 10, b: 52 }, showlegend: true, hovermode: "closest", dragmode: "zoom",
     legend: { orientation: "h", x: 0, y: -0.12, font: { size: 11.5, color: ink } },
     paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { family: css("--sans"), color: ink, size: 12 },
@@ -346,8 +355,9 @@ function draw() {
     const pt = (arr, extra) => ({ type: "scattergl", mode: "markers", legendgroup: g, x: arr.map(r => Tx.f(r[state.x])), y: arr.map(r => Ty.f(r[state.y])),
       customdata: arr.map(r => r.i), hovertext: arr.map(r => hover(r) + `<br><i>${state.excluded.has(r.id) ? "click to put back" : "click to remove"}</i>`), hoverinfo: "text", ...extra });
     const solid = used.filter(r => !when(S.hollow_when, r)), hollow = used.filter(r => when(S.hollow_when, r));
-    traces.push(pt(solid, { name: `${g} (${used.length})`, marker: { color: col, symbol: sym, size: 8, opacity: .82, line: { color: panel, width: .6 } } }));
-    if (hollow.length) traces.push(pt(hollow, { showlegend: false, marker: { color: col, symbol: sym + "-open", size: 8, line: { color: col, width: 1.4 } } }));
+    const shade = arr => arr.map(r => dim(r) ? hexA(col, .15) : hexA(col, .85));
+    traces.push(pt(solid, { name: `${g} (${used.length})`, marker: { color: shade(solid), symbol: sym, size: 8, line: { color: panel, width: .6 } } }));
+    if (hollow.length) traces.push(pt(hollow, { showlegend: false, marker: { color: col, symbol: sym + "-open", size: 8, line: { color: shade(hollow), width: 1.4 } } }));
     const ringed = used.filter(r => when(S.ring_when, r));
     if (ringed.length) traces.push({ ...pt(ringed, { showlegend: false, marker: { color: ink, symbol: "circle-open", size: 15, line: { color: ink, width: 1.2 } } }) });
     if (band.length) traces.push({ ...pt(band, { showlegend: false, marker: { color: col, symbol: sym + "-open", size: 8, line: { color: col, width: 1.3 } } }),
@@ -364,11 +374,12 @@ function draw() {
         traces.push({ type: "scatter", mode: "lines", x: [lo, hi], y: [fit.intercept + fit.slope * lo, fit.intercept + fit.slope * hi], line: { color: col, dash: "dash", width: 1.5 }, hoverinfo: "skip", showlegend: false, legendgroup: g }); }
     }
   });
-  if (picked && ok(picked[state.x]) && ok(picked[state.y]) && passFilters(picked))
-    traces.push({ type: "scatter", mode: "markers", x: [Tx.f(picked[state.x])], y: [Ty.f(picked[state.y])], hoverinfo: "skip", showlegend: false,
-      marker: { size: 20, color: "rgba(0,0,0,0)", line: { color: css("--accent"), width: 3 } } });
+  const hl = ROWS.filter(r => SEL.has(r.id) && ok(r[state.x]) && ok(r[state.y]) && passFilters(r) && groups.includes(r[cb]));
+  if (hl.length) traces.push({ type: "scatter", mode: "markers", x: hl.map(r => Tx.f(r[state.x])), y: hl.map(r => Ty.f(r[state.y])), hoverinfo: "skip", showlegend: false,
+    marker: { size: 17, color: "rgba(0,0,0,0)", line: { color: css("--accent"), width: 2.6 } } });
   if (bandY) { shapes.push({ type: "line", xref: "paper", x0: mainX[0], x1: mainX[1], yref: "y", y0: (yData1 + bandY) / 2 - .01 * (y1 - y0), y1: (yData1 + bandY) / 2 - .01 * (y1 - y0), line: { color: muted, width: 1, dash: "dot" } });
     annotations.push({ xref: "paper", x: mainX[1], yref: "y", y: bandY + .035 * (y1 - y0), text: COLS[state.y].missing || `no ${short(state.y)} value`, showarrow: false, xanchor: "right", font: { size: 11, color: muted } }); }
+  if (state.showhist) {
   const bins = Math.max(5, Math.min(80, state.bins | 0));
   const hist = (vals, lo, hi) => { const c = new Array(bins).fill(0), w = (hi - lo) / bins;
     vals.forEach(v => { let k = Math.floor((Math.min(Math.max(v, lo), hi) - lo) / w); if (k >= bins) k = bins - 1; if (k < 0) k = 0; c[k]++; });
@@ -397,6 +408,7 @@ function draw() {
       annotations.push({ xref: tx, x: top * .5, yref: "paper", y: mainY[1] + .005, text: h.g.length > 8 ? h.g.slice(0, 7) + "…" : h.g, showarrow: false, yanchor: "bottom", font: { size: 10.5, color: col } });
     }
   });
+  }
   Plotly.react("plot", traces, layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"], toImageButtonOptions: { format: "svg", filename: `${state.x}_vs_${state.y}` } });
   const outside = groups.flatMap(g => sel[g].used).filter(r => !inLim(r)).length;
   document.getElementById("note").textContent = outside ? `${outside} point${outside > 1 ? "s" : ""} lie outside the axis limits${state.limfilter ? " and are left out of the statistics" : " but still count in the statistics"}.` : "";
@@ -475,6 +487,15 @@ function buildControls() {
   const bind = (id, k, num) => { const el = document.getElementById(id); el.onchange = () => { state[k] = num ? +el.value : el.checked; draw(); }; };
   bind("outliers", "outliers"); bind("fence", "fence", true); bind("band", "band"); bind("limfilter", "limfilter"); bind("showexcl", "showexcl"); bind("trend", "trend"); bind("bins", "bins", true);
   document.querySelectorAll("[data-hist]").forEach(b => b.onclick = () => { state.hist = b.dataset.hist; draw(); });
+  const hc = document.getElementById("hl-col"), hv = document.getElementById("hl-val");
+  hc.innerHTML = CAT.map(c => `<option value="${c}">${L(c)}</option>`).join("");
+  const fillVals = () => { hv.replaceChildren(...COLS[hc.value].order.map(v => { const o = document.createElement("option"); o.value = v; o.textContent = `${v} (${ROWS.filter(r => r[hc.value] === v).length})`; return o; })); };
+  hc.value = state.colorBy; fillVals(); hc.onchange = fillVals;
+  const groupIds = () => ROWS.filter(r => r[hc.value] === hv.value && passFilters(r)).map(r => r.id);
+  document.getElementById("hl-set").onclick = () => setSelection(groupIds());
+  document.getElementById("hl-add").onclick = () => setSelection(groupIds(), { add: true });
+  document.getElementById("hl-clear").onclick = () => setSelection([]);
+  bind("fade", "fade"); bind("showhist", "showhist");
   document.getElementById("restore").onclick = () => { state.excluded.clear(); saveExcluded(); draw(); };
   const vbox = document.getElementById("views");
   (S.views || []).forEach(v => { const b = document.createElement("button"); b.className = "btn"; b.type = "button"; b.textContent = v.name; b.onclick = () => { applyView(v); draw(); }; vbox.appendChild(b); });
@@ -502,10 +523,26 @@ function syncControls() {
   document.getElementById("colorby").value = state.colorBy;
   document.querySelectorAll("[data-hist]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.hist === state.hist)));
   document.querySelectorAll("#filters input[type=checkbox]").forEach(c => c.checked = state.filters[c.dataset.col].has(c.dataset.val));
-  for (const k of ["outliers", "band", "limfilter", "showexcl", "trend"]) document.getElementById(k).checked = state[k];
+  for (const k of ["outliers", "band", "limfilter", "showexcl", "trend", "fade", "showhist"]) document.getElementById(k).checked = state[k];
+  document.getElementById("hl-count").textContent = state.selected.size ? `${state.selected.size} highlighted` : "none highlighted";
+  document.querySelectorAll("[data-hist], #bins").forEach(el => el.disabled = !state.showhist);
+  document.getElementById("hist-hint").hidden = !state.showhist;
 }
 // Selected point: its values and remove / put back; modules add actions (e.g. links) through the pickActions hook.
 let picked = null;
+// Highlight = state.selected (row ids). Plain click: highlight that row only, or clear if it was the only one; with Shift/Ctrl/⌘: toggle it.
+function setSelection(ids, { add = false } = {}) {
+  if (!add) state.selected.clear(); ids.forEach(id => state.selected.add(id));
+  const last = ids.length ? ROWS.find(r => r.id === ids[ids.length - 1]) : null;
+  showPick(state.selected.size ? (last && state.selected.has(last.id) ? last : ROWS.find(r => state.selected.has(r.id))) : null);
+  hook("selected", [...state.selected]);
+}
+function clickRow(r, ev) {
+  const multi = ev && (ev.shiftKey || ev.metaKey || ev.ctrlKey);
+  if (multi) { state.selected.has(r.id) ? state.selected.delete(r.id) : state.selected.add(r.id);
+    showPick(state.selected.has(r.id) ? r : (state.selected.size ? ROWS.find(x => state.selected.has(x.id)) : null)); hook("selected", [...state.selected]); return; }
+  if (state.selected.size === 1 && state.selected.has(r.id)) setSelection([]); else setSelection([r.id]);
+}
 function fmtVal(k, v) { if (v == null) return COLS[k]?.missing || "–"; return typeof v === "number" ? String(+v.toPrecision(4)) : v; }
 function showPick(r, redraw = true) {
   picked = r; const box = document.getElementById("pick"); box.replaceChildren(); box.hidden = !r;
@@ -517,7 +554,7 @@ function showPick(r, redraw = true) {
   const rm = document.createElement("button"); rm.className = "btn"; rm.type = "button";
   rm.textContent = state.excluded.has(r.id) ? "Put back" : "Remove from plot";
   rm.onclick = () => { state.excluded.has(r.id) ? state.excluded.delete(r.id) : state.excluded.add(r.id); saveExcluded(); showPick(r); };
-  const x = document.createElement("button"); x.className = "btn"; x.type = "button"; x.textContent = "Close"; x.onclick = () => showPick(null);
+  const x = document.createElement("button"); x.className = "btn"; x.type = "button"; x.textContent = "Clear highlight"; x.onclick = () => setSelection([]);
   head.append(rm, x); box.append(head);
   const keys = [...new Set([state.x, state.y, state.colorBy,...(S.hover || []), ...Object.keys(COLS)])].filter(k => COLS[k]);
   const dl = document.createElement("dl");
@@ -527,7 +564,8 @@ function showPick(r, redraw = true) {
 function bindPlot() {
   const el = document.getElementById("plot");
   el.on("plotly_click", ev => { const p = ev.points && ev.points[0]; if (!p || p.customdata == null) return;
-    showPick(ROWS[p.customdata]); });
+    clickRow(ROWS[p.customdata], ev.event); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && state.selected.size && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || "")) setSelection([]); });
   el.on("plotly_relayout", ev => {
     if (ev["xaxis.autorange"] || ev["yaxis.autorange"]) { state.lim = { x: [null, null], y: [null, null] }; setTimeout(draw, 0); return; }
     let changed = false;
@@ -588,6 +626,11 @@ const TOOLS = [
       if (Array.isArray(xl)) state.lim.x = [xl[0] ?? null, xl[1] ?? null]; if (Array.isArray(yl)) state.lim.y = [yl[0] ?? null, yl[1] ?? null];
       draw(); const st = statsFor(lastSel, Object.keys(lastSel), null);
       return { view: viewOf(), within: st.within.map(w => ({ group: w.group, n: w.n, rho: w.rho, p_holm: w.p_holm })) }; } },
+  { name: "highlight_rows", description: "Highlight rows in the plot (and in modules such as curve panels), by id list or conditions; add=true adds to the current highlight, clear=true removes all highlight. Returns the highlighted ids.",
+    inputSchema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } }, where: WHERE, add: { type: "boolean" }, clear: { type: "boolean" } } },
+    execute: i => { if (i.clear) { setSelection([]); return { highlighted: [] }; }
+      const ids = i.where && i.where.length ? rowsWhere(i.where).map(r => r.id) : (i.ids || []).filter(id => ROWS.some(r => r.id === id));
+      setSelection(ids, { add: !!i.add }); return { highlighted: [...state.selected] }; } },
   { name: "remove_points", description: "Remove rows from the plot and statistics (as if the viewer clicked them), by id list or conditions; or restore them with restore=true. Returns how many changed.",
     inputSchema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } }, where: WHERE, restore: { type: "boolean" } } },
     execute: i => { const ids = new Set(i.ids || []); const rs = i.where && i.where.length ? rowsWhere(i.where) : ROWS.filter(r => ids.has(r.id)); let n = 0;

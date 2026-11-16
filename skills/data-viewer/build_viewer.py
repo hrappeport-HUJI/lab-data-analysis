@@ -24,6 +24,7 @@ The spec says how to show the table; every key but `columns` is optional:
       "ring_when":   {"column": "lag_source", "values": ["estimated"]},     # drawn with a ring
       "views": [{"name": "...", "x": "a", "y": "b", "x_scale": "log", "color_by": "strain",
                  "filters": {"strain": ["KLY"]}}],
+      "histograms": False,                 # marginal histograms off at first (default on; the viewer can toggle them)
       "features": {                        # optional modules, see SKILL.md; leave out for none
         "links": [{"name": "Open in review viewer", "url": "http://host:8891/?founder={id}"}],
         "chat": {"placeholder": "an example question"},
@@ -171,7 +172,7 @@ def agent_guide(b, data_note):
         "In a browser, the page exposes window.viewer with the same tools a chat model would use:",
         "  describe_data(), query_rows({where, columns, sort_by, descending, limit}), summarize({group_by, columns}),",
         "  correlate({x, y, group_by}), compare_groups({column, group_by}), set_view({x, y, x_scale, filters, ...}),",
-        "  remove_points({ids | where, restore}). window.viewer.tools lists their input schemas.",
+        "  highlight_rows({ids | where, add, clear}), remove_points({ids | where, restore}). window.viewer.tools lists their input schemas.",
         "  where = [{column, op, value}], op one of == != < <= > >= in 'not in' 'is null' 'not null'.",
         f"Features in this page: {', '.join(s.get('features') or {}) or 'none'}.",
     ]

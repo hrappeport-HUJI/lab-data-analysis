@@ -183,3 +183,14 @@ def test_log_ticks_cover_narrow_ranges():
     # narrow log ranges fall back to 1-2-5 steps and then to even ticks, so an axis never loses its labels
     assert "for (const m of [1, 2, 5])" in page and "if (inside.length < 3) inside = niceTicks(" in page
     assert 'hook("drawn", sel)' in page and 'hook("picked", r)' in page
+
+
+def test_highlight_and_histogram_toggle(tmp_path):
+    df, spec = toy()
+    spec["histograms"] = False
+    bv.write_viewer(df, spec, tmp_path / "h.html")
+    page = (tmp_path / "h.html").read_text(encoding="utf-8")
+    assert 'id="showhist"' in page and "showhist: S.histograms !== false" in page
+    assert 'id="hl-set"' in page and "function setSelection(" in page and "function clickRow(" in page
+    assert 'name: "highlight_rows"' in page and "highlight_rows({ids | where, add, clear})" in page
+    assert '"histograms":false' in page
