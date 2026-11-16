@@ -96,6 +96,29 @@ def check_spec(df, spec):
     for name in (spec.get("features") or {}):
         if name not in available_modules():
             errs.append(f"feature {name!r} does not exist; available: {', '.join(available_modules())}")
+    ts = (spec.get("features") or {}).get("timeseries")
+    if ts is not None:
+        series, channels = ts.get("series") or {}, ts.get("channels") or {}
+        for k, pnl in enumerate(ts.get("panels") or []):
+            name = pnl.get("name", k)
+            if pnl.get("series_col") not in cats:
+                errs.append(f"timeseries panel {name!r}: series_col {pnl.get('series_col')!r} is not a category column")
+            elif pnl["series_col"] in df.columns:
+                missing = sorted({str(v) for v in df[pnl["series_col"]].dropna()} - set(series))
+                if missing:
+                    errs.append(f"timeseries panel {name!r}: no series for {', '.join(missing[:5])}")
+            for e, col in (pnl.get("events") or {}).items():
+                if col not in nums:
+                    errs.append(f"timeseries panel {name!r}: event {e!r} column {col!r} is not a numeric column")
+            for ch in pnl.get("channels") or []:
+                if ch not in channels:
+                    errs.append(f"timeseries panel {name!r}: channel {ch!r} is not in 'channels'")
+            if pnl.get("x", "absolute") not in ["absolute", *(pnl.get("events") or {})]:
+                errs.append(f"timeseries panel {name!r}: x {pnl.get('x')!r} is neither 'absolute' nor an event")
+        for sid, chans in series.items():
+            for ch, s in chans.items():
+                if len(s.get("t", [])) != len(s.get("v", [])):
+                    errs.append(f"timeseries series {sid!r} channel {ch!r}: t and v differ in length")
     if errs:
         raise ValueError("data-viewer spec problems:\n  " + "\n  ".join(errs))
 

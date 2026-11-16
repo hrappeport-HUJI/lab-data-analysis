@@ -48,11 +48,14 @@ Switch a module on by naming it in `spec["features"]`; a module not named is not
 | Module | Config | What it does |
 |---|---|---|
 | `links` | `[{"name": "Open in review viewer", "url": "http://host:8891/?founder={id}"}]` | Adds links to the card that opens when a point is clicked. `{column}` placeholders, `{id}` is the row id. |
+| `timeseries` | `{"series": {id: {channel: {"t": [...], "v": [...]}}}, "channels": {...}, "panels": [{"name", "series_col", "events", "channels", "x", "scale"}], "show": [0, 1]}` (full format at the top of `web/modules/timeseries.js`) | Stacked curve panels under the plot, as many as the viewer chooses. Each panel picks a kind of curve (a row column naming the series, e.g. the source or the regrowth well), a measured channel, a time axis (absolute or since an event of the row) and linear or log. Clicking a point or a curve highlights that row's curves in every panel, with its events as dashed lines, and rings the point. Curves of rows that are filtered out or removed are hidden. Keep the series to what a person will look at (a few MB at most), since they are embedded in the page. |
 | `chat` | `{"placeholder": "an example question"}` | A chat box answered by Claude. Works only when the page is published as a claude.ai artifact with `capabilities: {"sample": {}}`; elsewhere it says so. Uses the viewer's own Claude account. |
 
-Without modules, clicking a point opens a card with all its values and a Remove / Put back button.
+Without modules, clicking a point rings it and opens a card with all its values and a Remove / Put back button.
 
-Adding a module: put `web/modules/<name>.js` (and optionally `<name>.css`, and `<name>.html` for a card under the plot) in the folder. The JS calls `viewerModule("<name>", {init(cfg) {}, pickActions(cfg, row, headerElement) {}})`; `cfg` is `spec.features[name]`. It can use the page's globals (`S` spec, `COLS`, `ROWS`, `state`, `draw()`, `TOOLS`). Add a row to the table above and a test in `tests/test_build_viewer.py`. New plot types (time series, image grids, heatmaps) should come in the same way, sharing the spec, filters, links and statistics.
+Links to files (`links` module) open only where those files are, at the same relative or absolute path: a page sent to someone else should carry what it shows (for example curves through `timeseries`) rather than link to files on the computer that built it.
+
+Adding a module: put `web/modules/<name>.js` (and optionally `<name>.css`, and `<name>.html` for a card under the plot) in the folder. The JS calls `viewerModule("<name>", {init(cfg) {}, pickActions(cfg, row, headerElement) {}, drawn(cfg, sel) {}, picked(cfg, row) {}})` (`drawn` runs after every redraw of the main plot, `picked` when a row is picked or the pick is cleared, with `row` null); `cfg` is `spec.features[name]`. It can use the page's globals (`S` spec, `COLS`, `ROWS`, `state`, `draw()`, `TOOLS`). Add a row to the table above and a test in `tests/test_build_viewer.py`. New plot types (time series, image grids, heatmaps) should come in the same way, sharing the spec, filters, links and statistics.
 
 ## Sharing
 

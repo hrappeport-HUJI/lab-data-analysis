@@ -150,3 +150,36 @@ def test_command_line_build_and_dump(tmp_path):
     bv.main(["build", str(tmp_path / "t.csv"), str(tmp_path / "s.json"), str(tmp_path / "v.html")])
     bv.main(["dump", str(tmp_path / "v.html"), str(tmp_path / "back.csv")])
     assert len(pd.read_csv(tmp_path / "back.csv")) == 40
+
+
+def test_timeseries_module(tmp_path):
+    df, spec = toy()
+    df["well"] = [f"w{i % 5}" for i in range(40)]
+    df["t_event"] = 2.0
+    spec["columns"]["well"] = {"label": "Well", "kind": "category"}
+    spec["columns"]["t_event"] = {"label": "Event time (h)"}
+    series = {f"w{k}": {"OD": {"t": [0, 1, 2, 3], "v": [0.1, 0.2, 0.4, 0.8]}} for k in range(5)}
+    spec["features"] = {"timeseries": {"series": series, "channels": {"OD": {"label": "OD", "scale": "log"}},
+                                       "panels": [{"name": "Well OD", "series_col": "well", "events": {"drug": "t_event"}, "x": "drug"}]}}
+    bv.write_viewer(df, spec, tmp_path / "t.html")
+    page = (tmp_path / "t.html").read_text(encoding="utf-8")
+    assert 'id="ts-card"' in page and 'viewerModule("timeseries"' in page and ".ts-row" in page
+    assert bv.read_viewer_data(tmp_path / "t.html")[1]["features"]["timeseries"]["series"]["w0"]["OD"]["v"][-1] == 0.8
+    bad = copy_spec(spec)
+    bad["features"]["timeseries"]["panels"][0].update(series_col="grp", events={"drug": "nope"}, x="later")
+    with pytest.raises(ValueError) as e:
+        bv.write_viewer(df, bad, tmp_path / "bad.html")
+    msg = str(e.value)
+    assert "no series for" in msg and "'nope' is not a numeric column" in msg and "neither 'absolute' nor an event" in msg
+
+
+def copy_spec(spec):
+    import copy
+    return copy.deepcopy(spec)
+
+
+def test_log_ticks_cover_narrow_ranges():
+    page = (Path(bv.WEB) / "core.html").read_text(encoding="utf-8")
+    # narrow log ranges fall back to 1-2-5 steps and then to even ticks, so an axis never loses its labels
+    assert "for (const m of [1, 2, 5])" in page and "if (inside.length < 3) inside = niceTicks(" in page
+    assert 'hook("drawn", sel)' in page and 'hook("picked", r)' in page
