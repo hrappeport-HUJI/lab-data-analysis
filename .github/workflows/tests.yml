@@ -14,5 +14,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e '.[test]' -r requirements.txt
-      - run: python -m pytest microscopy/tests plate_reader/tests
+      - run: python -m pytest microscopy/tests plate_reader/tests skills/data-viewer/tests
       - run: node --check microscopy/web/app.js
+      - run: for f in skills/data-viewer/web/modules/*.js; do node --check "$f"; done
