@@ -1,19 +1,19 @@
 #!/bin/bash
 # Move the heavy raw part of a finished experiment to the deep archive (Google Drive only), keeping the
-# experiment folder in ~/Research/Raw_data with its notebooks, results and a DEEP_ARCHIVE.md pointer.
+# experiment folder in ~/Research/Experiments with its notebooks, results and a DEEP_ARCHIVE.md pointer.
 #
-#   bash ~/Research/Code/lab-data-analysis/raw_data/deep_archive.sh "<experiment folder name>" <subfolder>
-#   e.g. bash ~/Research/Code/lab-data-analysis/raw_data/deep_archive.sh "2026-11-04 PI uptake of KLY and TBL8 by microscopy" microscopy
+#   bash ~/Research/Code/lab-data-analysis/experiments/deep_archive.sh "<experiment folder name>" <subfolder>
+#   e.g. bash ~/Research/Code/lab-data-analysis/experiments/deep_archive.sh "2026-11-04 PI uptake of KLY and TBL8 by microscopy" microscopy
 #
 # Steps: 1) SHA-256 manifest of the subfolder (kept in the experiment folder), 2) copy to
-# My Drive/Research deep archive/Raw_data/<experiment>/<subfolder>, 3) check every file arrived with the right size,
+# My Drive/Research deep archive/Experiments/<experiment>/<subfolder>, 3) check every file arrived with the right size,
 # 4) write DEEP_ARCHIVE.md. It never deletes: it prints the delete command, to run once Google Drive shows the
 # upload as finished. Afterwards update the experiment's Zettelkasten note (source_refs: storage_root Google Drive).
 set -euo pipefail
 EXP="$1"; SUB="${2%/}"
-RD="$HOME/Research/Raw_data"
+RD="$HOME/Research/Experiments"
 SRC="$RD/$EXP/$SUB"
-ARCH="$HOME/Library/CloudStorage/GoogleDrive-hrappeport@gmail.com/My Drive/Research deep archive/Raw_data/$EXP/$SUB"
+ARCH="$HOME/Library/CloudStorage/GoogleDrive-hrappeport@gmail.com/My Drive/Research deep archive/Experiments/$EXP/$SUB"
 MAN="$RD/$EXP/DEEP_ARCHIVE_${SUB//\//_}.sha256"
 [ -d "$SRC" ] || { echo "No such folder: $SRC"; exit 1; }
 [ -d "$HOME/Library/CloudStorage/GoogleDrive-hrappeport@gmail.com/My Drive" ] || { echo "Google Drive (hrappeport@gmail.com) is not mounted"; exit 1; }
@@ -39,7 +39,7 @@ echo "4/4 writing $RD/$EXP/DEEP_ARCHIVE.md"
 cat >> "$RD/$EXP/DEEP_ARCHIVE.md" <<EOF
 ## $SUB/ — deep-archived $(date +%F)
 
-- Moved to: Google Drive, account hrappeport@gmail.com, \`My Drive/Research deep archive/Raw_data/$EXP/$SUB/\`
+- Moved to: Google Drive, account hrappeport@gmail.com, \`My Drive/Research deep archive/Experiments/$EXP/$SUB/\`
 - Contents: $n files, $gb GB. Checksums: \`$(basename "$MAN")\` in this folder (\`shasum -a 256 -c\` from inside the folder restores the check).
 - To work on it again: in Finder, right-click the folder in Google Drive → "Available offline", or copy it back here.
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Build ~/Research/Raw_data/index.csv and INDEX.md: one row per experiment folder, with the metadata that
+"""Build ~/Research/Experiments/index.csv and INDEX.md: one row per experiment folder, with the metadata that
 can be read from the files (reader runs and start times, strains in plate maps, image counts, notebooks),
 the folder's old locations (from ~/Research/_reorg/manifest.tsv) and its Zettelkasten note.
 
-Run with the research env:  conda run -n research python ~/Research/Code/lab-data-analysis/raw_data/build_raw_data_index.py
+Run with the research env:  conda run -n research python ~/Research/Code/lab-data-analysis/experiments/build_experiments_index.py
 Re-run it after adding or renaming experiment folders. NOTES below holds hand-written remarks."""
 import csv, datetime, os, re, warnings
 from collections import Counter
@@ -12,7 +12,8 @@ warnings.filterwarnings("ignore")
 import openpyxl
 
 H = os.path.expanduser("~")
-RD = f"{H}/Research/Raw_data"
+RD = f"{H}/Research/Experiments"
+OLD_RD = f"{H}/Research/Raw_data"  # the folder's name until 2026-11-16; older manifest rows point there
 ZK = f"{H}/Research/Zettelkasten/Library/LabNotebook/Experiments"
 MANIFEST = f"{H}/Research/_reorg/manifest.tsv"
 SKIP_DIRS = ("scanlag_results", "microscopy_tagging_package", ".zarr", "__pycache__", ".ipynb_checkpoints", "training_tiles")
@@ -105,9 +106,11 @@ def old_paths():
         return m
     for l in list(open(MANIFEST, encoding="utf-8"))[1:]:
         _, _, old, new = l.rstrip("\n").split("\t")
+        if new.startswith(OLD_RD + "/"):
+            new = RD + new[len(OLD_RD):]
         if new.startswith(RD + "/"):
             top = new[len(RD) + 1:].split("/")[0]
-            if not re.search(r"/Raw_data/\d{4}-\d\d-\d\d ", old):
+            if not re.search(r"/(Raw_data|Experiments)/\d{4}-\d\d-\d\d ", old):
                 m.setdefault(top, []).append(old.replace(H, "~"))
     return m
 
@@ -171,7 +174,7 @@ def main():
         w.writeheader()
         w.writerows(rows)
     with open(f"{RD}/INDEX.md", "w", encoding="utf-8") as f:
-        f.write(f"# Raw_data index\n\nGenerated {datetime.date.today()} by `~/Research/Code/lab-data-analysis/raw_data/build_raw_data_index.py` "
+        f.write(f"# Experiments index\n\nGenerated {datetime.date.today()} by `~/Research/Code/lab-data-analysis/experiments/build_experiments_index.py` "
                 f"(full columns, including old locations, in `index.csv`). {len(rows)} experiments. Rules: `~/Research/ORGANIZATION.md`.\n\n")
         f.write("| Experiment | Reader runs (start) | Plate-map labels | TIFF | Notebooks | GB on Mac | Zettelkasten | Deep archive | Notes |\n|---|---|---|---|---|---|---|---|---|\n")
         for r in rows:

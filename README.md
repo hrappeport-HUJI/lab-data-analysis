@@ -5,8 +5,8 @@ Code for analyses that repeat across experiments. It holds code only.
 | What | Where |
 |---|---|
 | Code | This repo, cloned to `~/Research/Code/lab-data-analysis` |
-| Data: raw files, plate maps, notebooks and results of each experiment | `~/Research/Raw_data/YYYY-MM-DD <description>/`, backed up on Google Drive |
-| Tools for the raw-data folders (index, deep archive) | `raw_data/` |
+| Data: raw files, plate maps, notebooks and results of each experiment | `~/Research/Experiments/YYYY-MM-DD <description>/`, backed up on Google Drive |
+| Tools for the experiment folders (index, deep archive) | `experiments/` |
 | How to run an analysis, and what to ask first | Skills in the Zettelkasten: `Library/Skills/` |
 | What an experiment was and what it showed | Experiment notes in the Zettelkasten: `Library/LabNotebook/Experiments/` |
 

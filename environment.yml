@@ -1,5 +1,5 @@
 # research: the conda env for everything in this repo (plate_reader, scanlag_analyser, microscopy), for
-# the experiment notebooks in ~/Research/Raw_data and the projects in ~/Research/Code, on Hagai's M1 Mac.
+# the experiment notebooks in ~/Research/Experiments and the projects in ~/Research/Code, on Hagai's M1 Mac.
 #
 #     conda env create -f environment.yml     (from the repo root)
 #
