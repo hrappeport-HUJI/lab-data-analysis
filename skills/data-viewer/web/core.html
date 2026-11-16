@@ -108,7 +108,7 @@ td.name { font-family: var(--sans); font-size: 12.5px; }
       <label><input type="checkbox" id="limfilter"> Statistics use only points inside the limits</label>
       <label><input type="checkbox" id="showexcl" checked> Show removed points as grey crosses</label>
       <label><input type="checkbox" id="trend" checked> Trend lines (linear axes)</label>
-      <p class="hint">Click a point to see all its values; you can remove it from the plot and the statistics there.</p>
+      <p class="hint">Click a point to see all its values (it is ringed); you can remove it from the plot and the statistics there.</p>
     </fieldset>
     <fieldset><legend>Histograms</legend>
       <div class="seg" role="group" aria-label="Histogram layout">
@@ -253,12 +253,21 @@ function tf(axis) {
   if (state.scale[axis] !== "log") return { f: x => x, inv: x => x, ticks: null };
   const f = x => Math.asinh(x / (2 * c)) / Math.LN10;
   return { f, inv: t => 2 * c * Math.sinh(t * Math.LN10),
-    ticks: (lo, hi) => { const vals = [0]; for (let k = -6; k <= 9; k++) { const d = Math.pow(10, k); if (d >= c * .99) vals.push(d, -d); }
-      const inside = vals.filter(v => { const t = f(v); return t >= lo && t <= hi; }).sort((a, b) => a - b);
+    ticks: (lo, hi) => {
+      // Decades when the range spans several; 1-2-5 steps when it spans fewer; plain even ticks when even those miss.
+      const vals = [0]; for (let k = -9; k <= 9; k++) for (const m of [1, 2, 5]) { const d = m * Math.pow(10, k); if (d >= c * .99) vals.push(d, -d); }
+      const within = v => { const t = f(v); return t >= lo && t <= hi; };
+      let inside = vals.filter(within).sort((a, b) => a - b);
+      const decades = inside.filter(v => v === 0 || Math.abs(Math.log10(Math.abs(v)) % 1) < 1e-9);
+      if (decades.filter(v => v !== 0).length >= 3) inside = decades;
+      if (inside.length < 3) inside = niceTicks(2 * c * Math.sinh(lo * Math.LN10), 2 * c * Math.sinh(hi * Math.LN10)).filter(within);
       return { tickvals: inside.map(f), ticktext: inside.map(fmtTick) }; } };
 }
 const sup = e => String(e).split("").map(ch => "⁰¹²³⁴⁵⁶⁷⁸⁹"["0123456789".indexOf(ch)] ?? (ch === "-" ? "⁻" : ch)).join("");
-function fmtTick(v) { if (v === 0) return "0"; const a = Math.abs(v); const s = a >= .01 && a < 1e4 ? String(+a.toPrecision(3)) : `10${sup(Math.round(Math.log10(a)))}`; return (v < 0 ? "−" : "") + s; }
+function fmtTick(v) { if (v === 0) return "0"; const a = Math.abs(v);
+  let s; if (a >= .01 && a < 1e4) s = String(+a.toPrecision(3));
+  else { const e = Math.floor(Math.log10(a) + 1e-9), m = +(a / Math.pow(10, e)).toPrecision(2); s = (m === 1 ? "" : m + "×") + `10${sup(e)}`; }
+  return (v < 0 ? "−" : "") + s; }
 const fmt = v => v == null || !isFinite(v) ? "–" : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : Math.abs(v) >= 1 ? v.toFixed(2) : v.toPrecision(2);
 const fmtP = p => !isFinite(p) ? "–" : p < 1e-4 ? p.toExponential(0) : p < 0.01 ? p.toPrecision(1) : p.toFixed(p < 0.1 ? 3 : 2);
 const stars = p => !isFinite(p) ? "" : p < .001 ? "***" : p < .01 ? "**" : p < .05 ? "*" : "";
@@ -355,6 +364,9 @@ function draw() {
         traces.push({ type: "scatter", mode: "lines", x: [lo, hi], y: [fit.intercept + fit.slope * lo, fit.intercept + fit.slope * hi], line: { color: col, dash: "dash", width: 1.5 }, hoverinfo: "skip", showlegend: false, legendgroup: g }); }
     }
   });
+  if (picked && ok(picked[state.x]) && ok(picked[state.y]) && passFilters(picked))
+    traces.push({ type: "scatter", mode: "markers", x: [Tx.f(picked[state.x])], y: [Ty.f(picked[state.y])], hoverinfo: "skip", showlegend: false,
+      marker: { size: 20, color: "rgba(0,0,0,0)", line: { color: css("--accent"), width: 3 } } });
   if (bandY) { shapes.push({ type: "line", xref: "paper", x0: mainX[0], x1: mainX[1], yref: "y", y0: (yData1 + bandY) / 2 - .01 * (y1 - y0), y1: (yData1 + bandY) / 2 - .01 * (y1 - y0), line: { color: muted, width: 1, dash: "dot" } });
     annotations.push({ xref: "paper", x: mainX[1], yref: "y", y: bandY + .035 * (y1 - y0), text: COLS[state.y].missing || `no ${short(state.y)} value`, showarrow: false, xanchor: "right", font: { size: 11, color: muted } }); }
   const bins = Math.max(5, Math.min(80, state.bins | 0));
@@ -389,6 +401,7 @@ function draw() {
   const outside = groups.flatMap(g => sel[g].used).filter(r => !inLim(r)).length;
   document.getElementById("note").textContent = outside ? `${outside} point${outside > 1 ? "s" : ""} lie outside the axis limits${state.limfilter ? " and are left out of the statistics" : " but still count in the statistics"}.` : "";
   renderStats(sel, groups, inLim); renderExcluded(); syncControls();
+  hook("drawn", sel);
 }
 
 function statsFor(sel, groups, inLim, x = state.x, y = state.y) {
@@ -494,14 +507,16 @@ function syncControls() {
 // Selected point: its values and remove / put back; modules add actions (e.g. links) through the pickActions hook.
 let picked = null;
 function fmtVal(k, v) { if (v == null) return COLS[k]?.missing || "–"; return typeof v === "number" ? String(+v.toPrecision(4)) : v; }
-function showPick(r) {
-  picked = r; const box = document.getElementById("pick"); box.replaceChildren(); box.hidden = !r; if (!r) return;
+function showPick(r, redraw = true) {
+  picked = r; const box = document.getElementById("pick"); box.replaceChildren(); box.hidden = !r;
+  if (redraw) draw();  // rings the picked point; modules hear it through the "drawn" and "picked" hooks
+  hook("picked", r); if (!r) return;
   const head = document.createElement("div"); head.className = "pick-head";
   const t = document.createElement("b"); t.textContent = label(r); head.append(t);
   hook("pickActions", r, head);
   const rm = document.createElement("button"); rm.className = "btn"; rm.type = "button";
   rm.textContent = state.excluded.has(r.id) ? "Put back" : "Remove from plot";
-  rm.onclick = () => { state.excluded.has(r.id) ? state.excluded.delete(r.id) : state.excluded.add(r.id); saveExcluded(); draw(); showPick(r); };
+  rm.onclick = () => { state.excluded.has(r.id) ? state.excluded.delete(r.id) : state.excluded.add(r.id); saveExcluded(); showPick(r); };
   const x = document.createElement("button"); x.className = "btn"; x.type = "button"; x.textContent = "Close"; x.onclick = () => showPick(null);
   head.append(rm, x); box.append(head);
   const keys = [...new Set([state.x, state.y, state.colorBy,...(S.hover || []), ...Object.keys(COLS)])].filter(k => COLS[k]);

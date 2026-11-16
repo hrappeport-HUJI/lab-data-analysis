@@ -1,0 +1,7 @@
+.ts-head { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; margin-bottom: 8px; }
+.ts-head h2 { margin: 0 auto 0 0; }
+.ts-head select { width: auto; }
+.ts-controls { display: grid; gap: 6px; margin-bottom: 6px; }
+.ts-row { display: grid; grid-template-columns: 22px minmax(150px, 2fr) minmax(120px, 1.4fr) minmax(130px, 1.4fr) auto; gap: 6px; align-items: center; font-size: 12.5px; }
+.ts-row .num { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+@media (max-width: 760px) { .ts-row { grid-template-columns: 22px 1fr 1fr; } }
