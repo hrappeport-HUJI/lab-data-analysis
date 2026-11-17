@@ -27,6 +27,8 @@ The spec says how to show the table; every key but `columns` is optional:
       "features": {                        # optional modules, see SKILL.md; leave out for none
         "links": [{"name": "Open in review viewer", "url": "http://host:8891/?founder={id}"}],
         "chat": {"placeholder": "an example question"},
+        "series": {"title": "PI over time", "x_label": "Time (h)", "y_label": "PI",   # needs series=long table
+                   "styles": {"fit": {"mode": "lines", "dash": "dash"}}, "lines": [{"column": "lag", "label": "division"}]},
       },
       "columns": {
         "a":      {"label": "A (unit)", "kind": "number", "scale": "log", "zone": 10, "short": "A",
@@ -106,9 +108,24 @@ def _num(v):
     return float(f"{float(v):.4g}")
 
 
-def bundle(df, spec):
-    """The page's data: {spec, ids, data: {column: [values]}, n}. Column-wise keeps it small and fast."""
+def _series(series, ids):
+    """Long table (id, series, x, y) -> {id: {series: [[x...], [y...]]}}, sorted by x, rows with no viewer row dropped."""
+    need = {"id", "series", "x", "y"}
+    if not need <= set(series.columns):
+        raise ValueError(f"series table needs columns {sorted(need)}; it has {list(series.columns)}")
+    s = series.assign(id=series["id"].astype(str), series=series["series"].astype(str))
+    s = s[s["id"].isin(set(ids))].dropna(subset=["x"]).sort_values(["id", "series", "x"])
+    out = {}
+    for (rid, name), g in s.groupby(["id", "series"], sort=False):
+        out.setdefault(rid, {})[name] = [[_num(v) for v in g["x"]], [_num(v) for v in g["y"]]]
+    return out
+
+
+def bundle(df, spec, series=None):
+    """The page's data: {spec, ids, data: {column: [values]}, n[, series]}. Column-wise keeps it small and fast."""
     check_spec(df, spec)
+    if ("series" in (spec.get("features") or {})) != (series is not None):
+        raise ValueError("the series feature and the series table go together: pass both or neither")
     spec = copy.deepcopy(spec)
     data = {}
     for name, meta in spec["columns"].items():
@@ -120,7 +137,10 @@ def bundle(df, spec):
             seen = {v for v in data[name] if v is not None}
             meta["order"] = [str(v) for v in meta.get("order", [])] + sorted(seen - {str(v) for v in meta.get("order", [])})
     ids = [str(v) for v in df[spec["id"]]] if spec.get("id") else [str(i) for i in range(len(df))]
-    return {"spec": spec, "ids": ids, "data": data, "n": len(df)}
+    b = {"spec": spec, "ids": ids, "data": data, "n": len(df)}
+    if series is not None:
+        b["series"] = _series(series, ids)
+    return b
 
 
 # ---------------------------------------------------------------- agent guide
@@ -133,6 +153,10 @@ def agent_guide(b, data_note):
         f"Rows: {b['n']}, each one {s.get('row_meaning', 'record')}. Row id column: {s.get('id') or '(row number)'}.",
         f"Data: {data_note}",
         "  Shape: {spec, ids: [row ids], data: {column: [one value per row]}, n}. null = missing.",
+        *(["  Per-row curves: series = {row id: {curve name: [[x...], [y...]]}}"
+           + (f" ({b['spec']['features']['series'].get('title', '')}: x = {b['spec']['features']['series'].get('x_label', 'x')},"
+              f" y = {b['spec']['features']['series'].get('y_label', 'y')})" if isinstance(b['spec']['features'].get('series'), dict) else "")
+           + "; build_viewer.read_viewer_series(path) returns them as a long table."] if "series" in b else []),
         "  From Python: build_viewer.read_viewer_data(path) returns (DataFrame, spec).",
         "Columns:",
     ]
@@ -148,7 +172,7 @@ def agent_guide(b, data_note):
         "In a browser, the page exposes window.viewer with the same tools a chat model would use:",
         "  describe_data(), query_rows({where, columns, sort_by, descending, limit}), summarize({group_by, columns}),",
         "  correlate({x, y, group_by}), compare_groups({column, group_by}), set_view({x, y, x_scale, filters, ...}),",
-        "  remove_points({ids | where, restore}). window.viewer.tools lists their input schemas.",
+        "  remove_points({ids | where, restore})" + (", get_series({id})" if "series" in b else "") + ". window.viewer.tools lists their input schemas.",
         "  where = [{column, op, value}], op one of == != < <= > >= in 'not in' 'is null' 'not null'.",
         f"Features in this page: {', '.join(s.get('features') or {}) or 'none'}.",
     ]
@@ -167,15 +191,16 @@ def _plotly_tag(plotly, cache_dir=None):
     return "<script>" + path.read_text(encoding="utf-8").replace("</script", "<\\/script") + "</script>"
 
 
-def write_viewer(df, spec, out_html, data="auto", plotly="cdn", embed_limit_mb=EMBED_LIMIT_MB, plotly_cache=None):
+def write_viewer(df, spec, out_html, data="auto", plotly="cdn", embed_limit_mb=EMBED_LIMIT_MB, plotly_cache=None, series=None):
     """Write the viewer page (and out.data.js when the data goes in a separate file).
 
     data:   "embed" (one file), "file" (out.data.js beside the page) or "auto" (embed below embed_limit_mb).
     plotly: "cdn" (needs internet), "inline" (downloaded once, then cached) or a path to plotly.min.js.
+    series: long table with columns id, series, x, y for the `series` module (curves per row).
     Returns {"html": path, "data_file": path or None, "html_bytes": n, "data_bytes": n}.
     """
     out_html = Path(out_html)
-    b = bundle(df, spec)
+    b = bundle(df, spec, series)
     text = json.dumps(b, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     if data == "auto":
         data = "embed" if len(text.encode("utf-8")) < embed_limit_mb * 2**20 else "file"
@@ -213,6 +238,20 @@ def write_viewer(df, spec, out_html, data="auto", plotly="cdn", embed_limit_mb=E
 # ---------------------------------------------------------------- reading a page back
 def read_viewer_data(path):
     """(DataFrame, spec) from a built page or its .data.js file."""
+    b = _read_bundle(path)
+    df = pd.DataFrame(b["data"])
+    df.insert(0, "_id", b["ids"])
+    return df, b["spec"]
+
+
+def read_viewer_series(path):
+    """The per-row curves of a page as a long table (id, series, x, y); empty if it has none."""
+    rows = [(rid, name, x, y) for rid, curves in (_read_bundle(path).get("series") or {}).items()
+            for name, (xs, ys) in curves.items() for x, y in zip(xs, ys)]
+    return pd.DataFrame(rows, columns=["id", "series", "x", "y"])
+
+
+def _read_bundle(path):
     path = Path(path)
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".js":
@@ -225,11 +264,8 @@ def read_viewer_data(path):
             side = path.with_name(path.stem + ".data.js")
             if not side.exists():
                 raise FileNotFoundError(f"no embedded data and no {side.name} next to {path.name}")
-            return read_viewer_data(side)
-    b = json.loads(raw)
-    df = pd.DataFrame(b["data"])
-    df.insert(0, "_id", b["ids"])
-    return df, b["spec"]
+            return _read_bundle(side)
+    return json.loads(raw)
 
 
 def main(argv=None):
@@ -239,12 +275,14 @@ def main(argv=None):
     bp.add_argument("table"), bp.add_argument("spec"), bp.add_argument("out")
     bp.add_argument("--data", default="auto", choices=["auto", "embed", "file"])
     bp.add_argument("--plotly", default="cdn", help="cdn, inline, or a path to plotly.min.js")
+    bp.add_argument("--series", help="long table (id, series, x, y) for the series feature")
     dp = sub.add_parser("dump", help="page -> csv")
     dp.add_argument("page"), dp.add_argument("out")
     a = p.parse_args(argv)
     if a.cmd == "build":
-        df = pd.read_parquet(a.table) if a.table.endswith(".parquet") else pd.read_csv(a.table)
-        r = write_viewer(df, json.loads(Path(a.spec).read_text(encoding="utf-8")), a.out, data=a.data, plotly=a.plotly)
+        read = lambda p: pd.read_parquet(p) if p.endswith(".parquet") else pd.read_csv(p)
+        r = write_viewer(read(a.table), json.loads(Path(a.spec).read_text(encoding="utf-8")), a.out, data=a.data, plotly=a.plotly,
+                         series=read(a.series) if a.series else None)
         print(f"{r['html']} ({r['html_bytes'] / 1024:.0f} KB)" + (f" + {r['data_file']} ({r['data_bytes'] / 1024:.0f} KB)" if r["data_file"] else ""))
     else:
         df, _ = read_viewer_data(a.page)

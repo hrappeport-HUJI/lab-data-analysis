@@ -504,9 +504,11 @@ function showPick(r) {
   rm.onclick = () => { state.excluded.has(r.id) ? state.excluded.delete(r.id) : state.excluded.add(r.id); saveExcluded(); draw(); showPick(r); };
   const x = document.createElement("button"); x.className = "btn"; x.type = "button"; x.textContent = "Close"; x.onclick = () => showPick(null);
   head.append(rm, x); box.append(head);
+  hook("pickBody", r, box);
   const keys = [...new Set([state.x, state.y, state.colorBy,...(S.hover || []), ...Object.keys(COLS)])].filter(k => COLS[k]);
   const dl = document.createElement("dl");
-  for (const k of keys) { const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = COLS[k].short || COLS[k].label; dd.textContent = fmtVal(k, r[k]); dl.append(dt, dd); }
+  for (const k of keys) { const pair = document.createElement("div"), dt = document.createElement("dt"), dd = document.createElement("dd");
+    dt.textContent = COLS[k].short || COLS[k].label; dd.textContent = fmtVal(k, r[k]); pair.append(dt, dd); dl.append(pair); }
   box.append(dl);
 }
 function bindPlot() {
@@ -578,11 +580,12 @@ const TOOLS = [
     execute: i => { const ids = new Set(i.ids || []); const rs = i.where && i.where.length ? rowsWhere(i.where) : ROWS.filter(r => ids.has(r.id)); let n = 0;
       rs.forEach(r => { if (i.restore ? state.excluded.delete(r.id) : !state.excluded.has(r.id) && state.excluded.add(r.id)) n++; }); saveExcluded(); draw(); return { changed: n, removed_total: state.excluded.size }; } },
 ];
-// Same tools for any agent driving the page in a browser: window.viewer.query_rows({...}) etc.
-window.viewer = Object.fromEntries(TOOLS.map(t => [t.name, (input = {}) => t.execute(input)]));
-window.viewer.tools = TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
 
 /*MODULE_JS*/
+
+// Same tools for any agent driving the page in a browser: window.viewer.query_rows({...}) etc. (modules may add tools above)
+window.viewer = Object.fromEntries(TOOLS.map(t => [t.name, (input = {}) => t.execute(input)]));
+window.viewer.tools = TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
 
 buildControls(); draw(); bindPlot(); hook("init");
 const mq = window.matchMedia("(prefers-color-scheme: dark)"); mq.addEventListener && mq.addEventListener("change", draw);

@@ -48,11 +48,12 @@ Switch a module on by naming it in `spec["features"]`; a module not named is not
 | Module | Config | What it does |
 |---|---|---|
 | `links` | `[{"name": "Open in review viewer", "url": "http://host:8891/?founder={id}"}]` | Adds links to the card that opens when a point is clicked. `{column}` placeholders, `{id}` is the row id. |
+| `series` | `{"title", "x_label", "y_label", "y_scale", "styles": {curve: {mode, dash, color, opacity}}, "lines": [{"column", "label"}]}`, plus `write_viewer(..., series=long_table)` with columns `id, series, x, y` | Draws each clicked row's own curves (e.g. a signal over time, its fit, the descendants' mean) in the card, with vertical lines at that row's values of the named columns (e.g. lag) and a log/linear toggle. Adds a `get_series` tool for agents and the chat. |
 | `chat` | `{"placeholder": "an example question"}` | A chat box answered by Claude. Works only when the page is published as a claude.ai artifact with `capabilities: {"sample": {}}`; elsewhere it says so. Uses the viewer's own Claude account. |
 
 Without modules, clicking a point opens a card with all its values and a Remove / Put back button.
 
-Adding a module: put `web/modules/<name>.js` (and optionally `<name>.css`, and `<name>.html` for a card under the plot) in the folder. The JS calls `viewerModule("<name>", {init(cfg) {}, pickActions(cfg, row, headerElement) {}})`; `cfg` is `spec.features[name]`. It can use the page's globals (`S` spec, `COLS`, `ROWS`, `state`, `draw()`, `TOOLS`). Add a row to the table above and a test in `tests/test_build_viewer.py`. New plot types (time series, image grids, heatmaps) should come in the same way, sharing the spec, filters, links and statistics.
+Adding a module: put `web/modules/<name>.js` (and optionally `<name>.css`, and `<name>.html` for a card under the plot) in the folder. The JS calls `viewerModule("<name>", {init(cfg) {}, pickActions(cfg, row, headerElement) {}, pickBody(cfg, row, cardElement) {}})`; `cfg` is `spec.features[name]`. A module can also push data tools onto `TOOLS`; they then appear in `window.viewer` and the chat. It can use the page's globals (`S` spec, `COLS`, `ROWS`, `state`, `draw()`, `TOOLS`). Add a row to the table above and a test in `tests/test_build_viewer.py`. New plot types (time series, image grids, heatmaps) should come in the same way, sharing the spec, filters, links and statistics.
 
 ## Sharing
 

@@ -26,6 +26,32 @@ def toy():
     return df, spec
 
 
+def toy_series(df):
+    rows = [(k, "signal", t, 100 * np.exp(-.3 * t)) for k in df.key[:5] for t in np.arange(0, 3, .5)]
+    rows += [(k, "fit", t, 99 * np.exp(-.3 * t)) for k in df.key[:5] for t in (0, 3)] + [("not-a-row", "signal", 0, 1)]
+    return pd.DataFrame(rows, columns=["id", "series", "x", "y"])
+
+
+def series_spec(spec):
+    spec["features"] = {"series": {"title": "Signal", "x_label": "t", "styles": {"fit": {"mode": "lines", "dash": "dash"}},
+                                   "lines": [{"column": "x", "label": "x"}]}}
+    return spec
+
+
+def test_series_round_trip_and_pairing(tmp_path):
+    df, spec = toy()
+    with pytest.raises(ValueError, match="go together"):
+        bv.write_viewer(df, series_spec(spec), tmp_path / "v.html")
+    with pytest.raises(ValueError, match="go together"):
+        bv.write_viewer(df, toy()[1], tmp_path / "v.html", series=toy_series(df))
+    bv.write_viewer(df, series_spec(spec), tmp_path / "v.html", series=toy_series(df))
+    page = (tmp_path / "v.html").read_text(encoding="utf-8")
+    assert 'viewerModule("series"' in page and "get_series({id})" in page and "Per-row curves" in page
+    s = bv.read_viewer_series(tmp_path / "v.html")
+    assert set(s.id) == set(df.key[:5]) and len(s) == 5 * 8  # the row that is not in the table is dropped
+    assert bv.read_viewer_series(bv.write_viewer(df, toy()[1], tmp_path / "w.html")["html"]).empty
+
+
 def scripts(page):
     return [m.group(1) for m in re.finditer(r"<script>(.*?)</script>", page, re.S)]
 
@@ -96,7 +122,7 @@ def test_spec_errors_are_reported_together():
 def test_page_code_parses(tmp_path):
     df, spec = toy()
     spec["features"] = {name: ({} if name != "links" else [{"name": "S", "url": "http://h/{id}"}]) for name in bv.available_modules()}
-    bv.write_viewer(df, spec, tmp_path / "v.html")
+    bv.write_viewer(df, spec, tmp_path / "v.html", series=toy_series(df))
     code = scripts((tmp_path / "v.html").read_text(encoding="utf-8"))[-1]
     (tmp_path / "page.js").write_text(code, encoding="utf-8")
     subprocess.run(["node", "--check", str(tmp_path / "page.js")], check=True)
@@ -114,8 +140,10 @@ def _chrome():
 
 PROBE = """<script>setTimeout(() => { const o = document.createElement('pre'); o.id = 'probe';
 try { showPick(ROWS[0]); o.textContent = JSON.stringify({ svg: !!document.querySelector('#plot .main-svg'),
-  within: document.querySelectorAll('#t-within tbody tr').length, links: [...document.querySelectorAll('#pick a')].map(a => a.href),
-  groups: window.viewer.summarize({group_by: ['grp'], columns: ['x']}).length });
+  within: document.querySelectorAll('#t-within tbody tr').length, links: [...document.querySelectorAll('#pick .pick-head a')].map(a => a.href),
+  groups: window.viewer.summarize({group_by: ['grp'], columns: ['x']}).length,
+  series_traces: document.querySelectorAll('#pick .series .scatterlayer .trace').length,
+  series_tool: Object.keys(window.viewer.get_series ? window.viewer.get_series({id: ROWS[0].id}) : {}) });
 } catch (e) { o.textContent = 'ERROR ' + e.message; } document.body.appendChild(o); }, 2000);</script>"""
 
 
@@ -125,8 +153,9 @@ def test_page_draws_when_opened_from_disk(tmp_path, data):
     """Open the page from file:// as a double-click would: plot, statistics, click card, agent tools."""
     import json
     df, spec = toy()
-    spec["features"] = {"links": [{"name": "Source", "url": "http://h/?id={id}"}]}
-    bv.write_viewer(df, spec, tmp_path / "v.html", data=data)
+    spec = series_spec(spec)
+    spec["features"]["links"] = [{"name": "Source", "url": "http://h/?id={id}"}]
+    bv.write_viewer(df, spec, tmp_path / "v.html", data=data, series=toy_series(df))
     page = tmp_path / "v.html"
     page.write_text(page.read_text(encoding="utf-8").replace("</body>", PROBE + "</body>"), encoding="utf-8")
     try:
@@ -141,6 +170,7 @@ def test_page_draws_when_opened_from_disk(tmp_path, data):
     got = json.loads(m.group(1))
     assert got["svg"] and got["within"] == 3 and got["groups"] == 3  # a, b and the odd group
     assert got["links"] == ["http://h/?id=r0"]
+    assert got["series_traces"] == 2 and sorted(got["series_tool"]) == ["fit", "signal"]
 
 
 def test_command_line_build_and_dump(tmp_path):
