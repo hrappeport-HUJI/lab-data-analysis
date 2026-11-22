@@ -49,7 +49,7 @@ git remote add scanlag-upstream https://github.com/alongutf/scanlag_analyser  # 
 git subtree pull --prefix=scanlag_analyser scanlag-upstream master
 ```
 
-To analyze a run, give an agent the general skill in the folder, `scanlag_analyser/skills/scanlag-analysis/SKILL.md`, or follow it yourself. In Hagai's workspace use the `scanlag-experiment` skill in the Zettelkasten (`Library/Skills/scanlag-experiment/`) instead: it points to the general skill and adds the local paths, env and results note. In short: `scripts/inspect_scans.py` checks the scans and time zero, `scripts/check_density.py` finds TNTC plates, `scripts/scanlag_pipeline.py` segments and tracks, and `scripts/scanlag_analysis.py` draws the histograms. On Hagai's Mac it runs in the `research` env (`environment.yml` at the repo root, which also covers `plate_reader` and `microscopy`), with the U-Net on the Apple GPU.
+To analyze a run, give an agent the general skill in the folder, `scanlag_analyser/skills/scanlag-analysis/SKILL.md`, or follow it yourself. In Hagai's workspace use the `scanlag-experiment` skill in the Zettelkasten (`Library/Skills/scanlag-experiment/`) instead: it points to the general skill and adds the local paths, env and results note. In short: `scripts/inspect_scans.py` checks the scans and time zero, `scripts/check_density.py` finds TNTC plates, `scripts/scanlag_pipeline.py` segments and tracks, and `scripts/scanlag_analysis.py` draws the histograms, and `scripts/scanlag_viewer.py` builds the interactive viewer. On Hagai's Mac it runs in the `research` env (`environment.yml` at the repo root, which also covers `plate_reader` and `microscopy`), with the U-Net on the Apple GPU.
 
 Tests:
 

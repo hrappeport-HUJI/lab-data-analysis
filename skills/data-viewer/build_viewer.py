@@ -27,6 +27,7 @@ The spec says how to show the table; every key but `columns` is optional:
       "features": {                        # optional modules, see SKILL.md; leave out for none
         "links": [{"name": "Open in review viewer", "url": "http://host:8891/?founder={id}"}],
         "chat": {"placeholder": "an example question"},
+        "cdf": {"column": "a", "scale": "log", "title": "..."},
       },
       "columns": {
         "a":      {"label": "A (unit)", "kind": "number", "scale": "log", "zone": 10, "short": "A",
@@ -119,6 +120,13 @@ def check_spec(df, spec):
             for ch, s in chans.items():
                 if len(s.get("t", [])) != len(s.get("v", [])):
                     errs.append(f"timeseries series {sid!r} channel {ch!r}: t and v differ in length")
+    cdf = (spec.get("features") or {}).get("cdf")
+    if cdf is not None:
+        for c in [cdf.get("column")] * bool(cdf.get("column")) + list(cdf.get("columns") or []):
+            if c not in nums:
+                errs.append(f"cdf: column {c!r} is not a numeric column")
+        if cdf.get("scale", "log") not in ("log", "linear"):
+            errs.append(f"cdf: scale must be 'log' or 'linear', not {cdf.get('scale')!r}")
     if errs:
         raise ValueError("data-viewer spec problems:\n  " + "\n  ".join(errs))
 

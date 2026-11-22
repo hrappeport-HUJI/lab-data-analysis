@@ -173,6 +173,19 @@ def test_timeseries_module(tmp_path):
     assert "no series for" in msg and "'nope' is not a numeric column" in msg and "neither 'absolute' nor an event" in msg
 
 
+def test_cdf_module(tmp_path):
+    df, spec = toy()
+    spec["features"] = {"cdf": {"column": "x", "columns": ["x", "y"], "scale": "linear", "title": "X survival"}}
+    bv.write_viewer(df, spec, tmp_path / "c.html")
+    page = (tmp_path / "c.html").read_text(encoding="utf-8")
+    assert 'id="cdf-card"' in page and 'viewerModule("cdf"' in page and "#cdf-plot" in page
+    bad = copy_spec(spec)
+    bad["features"]["cdf"].update(column="grp", scale="sqrt")
+    with pytest.raises(ValueError) as e:
+        bv.write_viewer(df, bad, tmp_path / "bad.html")
+    assert "'grp' is not a numeric column" in str(e.value) and "scale must be" in str(e.value)
+
+
 def copy_spec(spec):
     import copy
     return copy.deepcopy(spec)
