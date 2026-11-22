@@ -137,14 +137,22 @@ Before reporting, check:
 python CODE/scripts/scanlag_viewer.py RESULTS
 ```
 
-It writes `RESULTS/analysis/viewer.html`, one page that opens by double-click and can be sent to others (it needs internet for Plotly; add `--plotly inline` for a page that works offline). It is built with the data-viewer (`skills/data-viewer` in the `lab-data-analysis` repo, whose principles it follows; elsewhere set `DATA_VIEWER_DIR` to a copy). One point per included colony. The page holds:
+When one experiment has several scan folders (e.g. plated on two days), each analysed into its own `RESULTS`, build one page from all of them, since the comparison across them is usually the point:
 
-- **Show** and **Colour by**: condition, each extra grouping column of `conditions.csv`, scanner, plate, merged or not, flagged-and-kept or not. Unticking a plate or a condition updates every plot and statistic.
+```
+python CODE/scripts/scanlag_viewer.py RESULTS_1 RESULTS_2 --out PAGE --color-by condition --split-by day
+```
+
+They must have been analysed with the same fit settings (the script checks), and a `day` (or similar) column in each `conditions.csv` tells them apart.
+
+By default it writes `RESULTS/analysis/viewer.html`; a local setup may say where an experiment's main page goes (`--out`). It is one page that opens by double-click and can be sent to others (it needs internet for Plotly; add `--plotly inline` for a page that works offline). It is built with the data-viewer (`skills/data-viewer` in the `lab-data-analysis` repo, whose principles it follows; elsewhere set `DATA_VIEWER_DIR` to a copy). One point per included colony. The page holds:
+
+- **Show** and **Groups**: condition, each extra grouping column of `conditions.csv`, scanner, plate, merged or not, flagged-and-kept or not. Unticking a plate or a condition updates every plot and statistic. Groups are the "Colour by" category, optionally split by a second one ("Then split by", e.g. condition × day = four groups), told apart by shade, by marker/line/bar style, or by a colour each. Set the natural split for the experiment with `--split-by` and `--split-style`.
 - Preset views: **Lag histograms (all colonies)** (the top histograms, one lane per group), **Lag vs growth rate** (scatter, growth-rate histograms on the side, Spearman rho and permutation p per group, live), **Lag vs doubling time**, and **Lag vs growth rate, by plate**. Colonies without a growth value sit in a labelled band rather than being dropped.
-- A **1 − CDF** card under the plot: the fraction of each group's colonies not yet appeared by time x, on a log axis by default, so the late tail is visible. Its menu switches it to growth rate or doubling time.
+- A **1 − CDF** card under the plot: the fraction of each group's colonies not yet appeared by time x, with x and y each switchable between linear and log (log y by default, so the late tail is visible). Its menu switches it to growth rate or doubling time.
 - Tables of the within-group correlations and the between-group comparisons (Mann-Whitney, Kruskal-Wallis, Holm-corrected), recomputed on what is shown.
 
-"Lag" in the viewer is the appearance time, and its notes say so. Use `--color-by` (e.g. a strain column) when the experimenter's main comparison is not the condition.
+"Lag" in the viewer is the appearance time, and its notes say so. Use `--color-by` (e.g. a strain column) when the experimenter's main comparison is not the condition. When groups differ in time zero or setup (different days), read correlations within each of them, not pooled: a shift between groups can hide or fake a correlation.
 
 Before handing it over, open it yourself or check it with a headless browser: every condition appears with the expected colony count, the 1 − CDF curves start at 1, and the within-group correlations in the lag-vs-growth view match the `control` lines of step 6.
 

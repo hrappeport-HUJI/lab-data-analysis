@@ -29,7 +29,7 @@ def results(tmp_path, extra=True):
                              "appearance_h": rng.normal(7, 1), "radial_growth_um_per_h": np.nan if c == 0 else rng.normal(90, 10),
                              "doubling_time_h": rng.normal(2.5, .3), "radial_fit_r2": .98, "first_merged_min": 300.0 if c == 1 else np.nan,
                              "final_area_px": 400, "n_flags": int(c == 2), "flags": "doublet" if c == 2 else ""})
-    (tmp_path / "analysis").mkdir()
+    (tmp_path / "analysis").mkdir(parents=True)
     pd.DataFrame(rows).to_csv(tmp_path / "analysis" / "all_colonies.csv", index=False)
     head = "condition,scanner,plates" + (",strain" if extra else "")
     body = ["B,s1,4-6", "B,s2,4-6", "A,s1,1-3", "A,s2,1-3"]
@@ -60,3 +60,25 @@ def test_viewer_without_extra_groups_and_bad_colour(tmp_path):
     assert mod.build(res, tmp_path / "v.html", "cdn", "plate_id").is_file()
     with pytest.raises(SystemExit):
         mod.build(res, tmp_path / "w.html", "cdn", "strain")
+
+
+def test_several_folders_in_one_page(tmp_path):
+    mod = load_script()
+    day1, day2 = results(tmp_path / "day1"), results(tmp_path / "day2")   # same scanner names in both
+    import json
+    for d in (day1, day2):
+        (d / "analysis" / "settings.json").write_text(json.dumps({"fit": {"fit_first": 1, "fit_last": 12}}))
+    sys.path.insert(0, str(DV))
+    from build_viewer import read_viewer_data
+
+    out = mod.build([day1, day2], tmp_path / "results.html", "cdn", "condition", "strain", "style")
+    df, spec = read_viewer_data(out)
+    assert len(df) == 240 and df["_id"].is_unique
+    assert set(spec["columns"]["scanner"]["order"]) == {"day1/s1", "day1/s2", "day2/s1", "day2/s2"}
+    assert spec["split_by"] == "strain" and spec["split_style"] == "style"
+    assert spec["views"][3]["split_by"] is None                          # the by-plate view is not split
+    (day2 / "analysis" / "settings.json").write_text(json.dumps({"fit": {"fit_first": 2, "fit_last": 12}}))
+    with pytest.raises(SystemExit, match="different fit settings"):
+        mod.build([day1, day2], tmp_path / "r2.html", "cdn", None)
+    with pytest.raises(SystemExit):
+        mod.build([day1], tmp_path / "r3.html", "cdn", "condition", "condition")

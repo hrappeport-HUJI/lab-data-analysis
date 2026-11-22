@@ -18,16 +18,18 @@ The spec says how to show the table; every key but `columns` is optional:
       "id": "key",                         # unique row id column (default: row number)
       "label": "P{pos} · founder {num}",   # hover / card label, {column} placeholders
       "color_by": "strain",                # default colour column (a category column)
+      "split_by": "day",                   # optional second grouping: each colour group split by this category
+      "split_style": "shade",              # how the split groups differ: shade (of the colour), style (marker/dash/pattern), color
       "filters": ["strain", "group"],      # category columns offered as checkbox filters
       "hover": ["group"],                  # extra columns in the hover text
       "hollow_when": {"column": "lag_source", "values": ["not divided"]},   # drawn as hollow markers
       "ring_when":   {"column": "lag_source", "values": ["estimated"]},     # drawn with a ring
-      "views": [{"name": "...", "x": "a", "y": "b", "x_scale": "log", "color_by": "strain",
+      "views": [{"name": "...", "x": "a", "y": "b", "x_scale": "log", "color_by": "strain", "split_by": "day", "split_style": "style",
                  "filters": {"strain": ["KLY"]}}],
       "features": {                        # optional modules, see SKILL.md; leave out for none
         "links": [{"name": "Open in review viewer", "url": "http://host:8891/?founder={id}"}],
         "chat": {"placeholder": "an example question"},
-        "cdf": {"column": "a", "scale": "log", "title": "..."},
+        "cdf": {"column": "a", "scale": "log", "x_scale": "linear", "title": "..."},
       },
       "columns": {
         "a":      {"label": "A (unit)", "kind": "number", "scale": "log", "zone": 10, "short": "A",
@@ -53,7 +55,8 @@ WEB = HERE / "web"
 MODULES = WEB / "modules"
 PLOTLY_VERSION = "2.27.0"
 PLOTLY_URL = f"https://cdnjs.cloudflare.com/ajax/libs/plotly.js/{PLOTLY_VERSION}/plotly.min.js"
-EMBED_LIMIT_MB = 5  # data="auto": embed below this, separate .data.js file above
+EMBED_LIMIT_MB = 5
+SPLIT_STYLES = ("shade", "style", "color")  # how groups split by a second category differ  # data="auto": embed below this, separate .data.js file above
 
 
 def available_modules():
@@ -82,6 +85,10 @@ def check_spec(df, spec):
     for k in spec.get("filters", []) + ([spec["color_by"]] if spec.get("color_by") else []):
         if k not in cats:
             errs.append(f"{k!r} is used as a filter or colour but is not a category column")
+    if spec.get("split_by") and spec["split_by"] not in cats:
+        errs.append(f"split_by {spec['split_by']!r} is not a category column")
+    if spec.get("split_style", "shade") not in SPLIT_STYLES:
+        errs.append(f"split_style must be one of {', '.join(SPLIT_STYLES)}")
     for rule in ("hollow_when", "ring_when"):
         if spec.get(rule) and spec[rule].get("column") not in cols:
             errs.append(f"{rule}: column {spec[rule].get('column')!r} is not in spec['columns']")
@@ -91,6 +98,10 @@ def check_spec(df, spec):
                 errs.append(f"view {v.get('name')!r}: {axis} {v[axis]!r} is not a numeric column")
         if v.get("color_by") and v["color_by"] not in cats:
             errs.append(f"view {v.get('name')!r}: color_by {v['color_by']!r} is not a category column")
+        if v.get("split_by") and v["split_by"] not in cats:
+            errs.append(f"view {v.get('name')!r}: split_by {v['split_by']!r} is not a category column")
+        if v.get("split_style", "shade") not in SPLIT_STYLES:
+            errs.append(f"view {v.get('name')!r}: split_style must be one of {', '.join(SPLIT_STYLES)}")
         for c in (v.get("filters") or {}):
             if c not in spec.get("filters", []):
                 errs.append(f"view {v.get('name')!r}: filter {c!r} is not in spec['filters']")
@@ -127,6 +138,8 @@ def check_spec(df, spec):
                 errs.append(f"cdf: column {c!r} is not a numeric column")
         if cdf.get("scale", "log") not in ("log", "linear"):
             errs.append(f"cdf: scale must be 'log' or 'linear', not {cdf.get('scale')!r}")
+        if cdf.get("x_scale", "linear") not in ("log", "linear"):
+            errs.append(f"cdf: x_scale must be 'log' or 'linear', not {cdf.get('x_scale')!r}")
     if errs:
         raise ValueError("data-viewer spec problems:\n  " + "\n  ".join(errs))
 

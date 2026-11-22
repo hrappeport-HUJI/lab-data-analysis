@@ -1,12 +1,17 @@
 """Interactive viewer of a ScanLag analysis: one HTML page per experiment, built with the data-viewer.
 
-    python scripts/scanlag_viewer.py <results folder> [--out FILE] [--plotly cdn|inline] [--color-by COLUMN]
+    python scripts/scanlag_viewer.py <results folder> [<results folder> ...] [--out FILE] [--plotly cdn|inline]
+                                     [--color-by COLUMN] [--split-by COLUMN] [--split-style shade|style|color]
 
 Reads <results>/analysis/all_colonies.csv (run scanlag_analysis.py first) and <results>/conditions.csv, and
-writes <results>/analysis/viewer.html: one point per included colony, with
+writes <results>/analysis/viewer.html (or --out): one point per included colony. Several results folders (e.g.
+the scan days of one experiment) go into one page; then --out is required, every folder must have been analysed
+with the same fit settings, and when a scanner name occurs in two folders every scanner is prefixed with its
+folder's name. The page has
 
 * filters and colours by condition, scanner, plate, and any extra column of conditions.csv (e.g. strain,
-  medium, replicate: one value per row of the layout, so every plate of that row gets it),
+  medium, day, replicate: one value per row of the layout, so every plate of that row gets it), and a second
+  grouping that splits each colour group (e.g. condition x day = four groups),
 * preset views: lag histograms of all colonies, lag vs growth rate (Spearman per group, live), lag vs
   doubling time,
 * histograms per group along both axes, and 1 - CDF curves of lag (or growth) per group under the plot,
@@ -68,7 +73,8 @@ def ordered(values) -> list[str]:
     return seen
 
 
-def build(results: Path, out: Path, plotly: str, color_by: str | None) -> Path:
+def load(results: Path) -> tuple[pd.DataFrame, list[str], list[str], dict]:
+    """Colonies of one results folder with its extra grouping columns, the layout's condition order, and the fit."""
     table = results / "analysis" / "all_colonies.csv"
     if not table.is_file():
         sys.exit(f"{table} not found: run scripts/scanlag_analysis.py {results} first")
@@ -76,9 +82,38 @@ def build(results: Path, out: Path, plotly: str, color_by: str | None) -> Path:
     if df.empty:
         sys.exit(f"{table} has no colonies")
     df["plate"] = df["plate"].astype(int)
+    df["scanner"] = df["scanner"].astype(str)
     df, extra = group_columns(results / "conditions.csv", df)
     layout_order = ordered(pd.read_csv(results / "conditions.csv", dtype=str).iloc[:, 0].dropna().str.strip()) \
         if (results / "conditions.csv").is_file() else []
+    settings_file = results / "analysis" / "settings.json"
+    fit = json.loads(settings_file.read_text()).get("fit", {}) if settings_file.is_file() else {}
+    return df, extra, layout_order, fit
+
+
+def experiment_name(folders: list[Path]) -> str:
+    names = {f.resolve().parent.name if f.name.startswith("scanlag_results") else f.resolve().name for f in folders}
+    return names.pop() if len(names) == 1 else " + ".join(sorted(names))
+
+
+def build(results, out: Path, plotly: str, color_by: str | None, split_by: str | None = None,
+          split_style: str = "shade") -> Path:
+    folders = [Path(r) for r in ([results] if isinstance(results, (str, Path)) else results)]
+    loaded = [load(f) for f in folders]
+    fits = [fit for *_, fit in loaded]
+    if any(f != fits[0] for f in fits[1:]):
+        sys.exit("the results folders were analysed with different fit settings ("
+                 + "; ".join(f"{f}: {fit}" for f, fit in zip(folders, fits)) + "): re-run scanlag_analysis.py with the same options")
+    scanner_sets = [set(d["scanner"]) for d, *_ in loaded]
+    if sum(map(len, scanner_sets)) != len(set().union(*scanner_sets)):   # a scanner name in two folders
+        for f, (d, *_rest) in zip(folders, loaded):
+            d["scanner"] = f.name + "/" + d["scanner"]
+    df = pd.concat([d for d, *_ in loaded], ignore_index=True)
+    extra = ordered(c for _, ex, *_ in loaded for c in ex)
+    for c in extra:
+        df[c] = df[c].fillna("(none)")
+    layout_order = ordered(c for _, _, lo, _ in loaded for c in lo)
+    fit = fits[0]
 
     df["condition"] = df["condition"].astype(str)
     df["scanner"] = df["scanner"].astype(str)
@@ -108,34 +143,37 @@ def build(results: Path, out: Path, plotly: str, color_by: str | None) -> Path:
         "final_area_px": {"label": "Final area (px)", "short": "Final area", "scale": "log", "never_outlier": True},
         "radial_fit_r2": {"label": "Growth fit R²", "short": "Fit R²"},
     }
-    settings_file = results / "analysis" / "settings.json"
-    fit = json.loads(settings_file.read_text()).get("fit", {}) if settings_file.is_file() else {}
     fit_txt = (f" Growth rate fit: frames {fit.get('fit_first')}-{fit.get('fit_last')} after appearance, merged frames "
                f"{'split' if fit.get('merged_growth') == 'split' else 'excluded'}; doubling time {fit.get('lb')} → {fit.get('ub')} px.") if fit else ""
     groups_txt = f" Groups from conditions.csv: {', '.join(extra)}." if extra else ""
+    if len(folders) > 1:
+        groups_txt += " Colonies of " + ", ".join(f.name for f in folders) + ", each analysed on its own."
     notes = ("One point per colony kept after the review (status included). Lag is the appearance time: the first scan in which "
              "the colony is detected, measured from the run's time zero. It is a detection time, not the end of the lag, and a fast "
              "grower is detected earlier, so check the lag vs growth correlation before reading a lag difference as a lag effect." + fit_txt
              + " Colonies without a growth value sit in the band at the top of the lag vs growth views; the lag histograms and the "
              "1 - CDF curves use every colony." + groups_txt)
     first = color_by or "condition"
-    if first not in cats:
-        sys.exit(f"--color-by {first!r}: choose one of {', '.join(cats)}")
-    common = {"outliers": False, "color_by": first, "bins": 80}  # lag is in scan steps; 22 bins hide its shape
+    for opt, v in (("--color-by", first), ("--split-by", split_by)):
+        if v and v not in cats:
+            sys.exit(f"{opt} {v!r}: choose one of {', '.join(cats)}")
+    if split_by == first:
+        sys.exit("--split-by must differ from --color-by")
+    common = {"outliers": False, "color_by": first, "split_by": split_by, "split_style": split_style, "bins": 80}  # lag is in scan steps; 22 bins hide its shape
     spec = {
-        "title": f"ScanLag · {results.resolve().parent.name if results.name.startswith('scanlag_results') else results.name}",
+        "title": f"ScanLag · {experiment_name(folders)}",
         "subtitle": f"{len(df)} colonies · {df['condition'].nunique()} conditions · {df['plate_id'].nunique()} plates",
         "row_meaning": "one colony, kept after the review",
         "notes": notes, "id": "key",
         "label": "{condition} · {id}",
-        "color_by": first,
+        "color_by": first, "split_by": split_by, "split_style": split_style,
         "filters": ["condition", *extra, "scanner", "plate_id", "merged", "flagged"],
         "hover": ["condition", *extra, "plate_id"],
         "views": [
             {"name": "Lag histograms (all colonies)", "x": "appearance_h", "y": "final_area_px", "y_scale": "log", "band": False, "trend": False, **common},
             {"name": "Lag vs growth rate", "x": "appearance_h", "y": "radial_growth_um_per_h", "band": True, **common},
             {"name": "Lag vs doubling time", "x": "appearance_h", "y": "doubling_time_h", "band": True, **common},
-            {"name": "Lag vs growth rate, by plate", "x": "appearance_h", "y": "radial_growth_um_per_h", "band": True, **common, "color_by": "plate_id"},
+            {"name": "Lag vs growth rate, by plate", "x": "appearance_h", "y": "radial_growth_um_per_h", "band": True, **common, "color_by": "plate_id", "split_by": None},
         ],
         "features": {"cdf": {"column": "appearance_h", "columns": ["appearance_h", "radial_growth_um_per_h", "doubling_time_h"],
                              "scale": "log", "title": "1 − CDF: fraction of colonies above x (for lag: not yet appeared)"}},
@@ -151,12 +189,17 @@ def build(results: Path, out: Path, plotly: str, color_by: str | None) -> Path:
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("results", type=Path, help="results folder (with analysis/all_colonies.csv)")
-    parser.add_argument("--out", type=Path, help="page to write (default <results>/analysis/viewer.html)")
+    parser.add_argument("results", type=Path, nargs="+", help="results folder(s) (with analysis/all_colonies.csv)")
+    parser.add_argument("--out", type=Path, help="page to write (default <results>/analysis/viewer.html; required for several folders)")
     parser.add_argument("--plotly", default="cdn", help="cdn (needs internet, default) or inline (works offline, +3.5 MB)")
-    parser.add_argument("--color-by", help="first colour grouping: condition (default), an extra conditions.csv column, scanner or plate_id")
+    parser.add_argument("--color-by", help="colour grouping: condition (default), an extra conditions.csv column, scanner or plate_id")
+    parser.add_argument("--split-by", help="second grouping that splits each colour group, e.g. day (default none)")
+    parser.add_argument("--split-style", choices=["shade", "style", "color"], default="shade",
+                        help="how split groups differ: shades of the colour (default), marker/line/bar style, or a colour each")
     a = parser.parse_args(argv)
-    out = build(a.results, a.out or a.results / "analysis" / "viewer.html", a.plotly, a.color_by)
+    if len(a.results) > 1 and not a.out:
+        parser.error("--out is required with several results folders")
+    out = build(a.results, a.out or a.results[0] / "analysis" / "viewer.html", a.plotly, a.color_by, a.split_by, a.split_style)
     print(f"wrote {out}")
 
 

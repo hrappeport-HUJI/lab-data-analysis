@@ -764,10 +764,13 @@ python scripts\scanlag_analysis.py EPEC260224 --condition "CTRL=1-4.1u:1-3;1-5.1
 ### Interactive viewer (`scanlag_viewer.py`)
 
 ```bat
-python scripts\scanlag_viewer.py <results folder> [--out FILE] [--plotly cdn|inline] [--color-by COLUMN]
+python scripts\scanlag_viewer.py <results folder> [<results folder> ...] [--out FILE] [--plotly cdn|inline]
+                                  [--color-by COLUMN] [--split-by COLUMN] [--split-style shade|style|color]
 ```
 
-Run after `scanlag_analysis.py`. It reads `analysis/all_colonies.csv` and `conditions.csv` and writes
+Run after `scanlag_analysis.py`. Several results folders (e.g. two scan days of one experiment) go into one page
+with `--out`; they must have been analysed with the same fit settings, and if a scanner name occurs in two of
+them, every scanner is shown as `<results folder>/<scanner>`. It reads `analysis/all_colonies.csv` and `conditions.csv` and writes
 `analysis/viewer.html`: one self-contained page (double-click to open, can be emailed) with one point per
 included colony. Built with the data-viewer in `../skills/data-viewer` of
 [lab-data-analysis](https://github.com/hrappeport-HUJI/lab-data-analysis); if this folder is used on its own,
@@ -775,9 +778,9 @@ set `DATA_VIEWER_DIR` to a copy of it.
 
 | Part | What it shows |
 |---|---|
-| Show / Colour by | Condition, the extra columns of `conditions.csv`, scanner, plate, merged or not, flagged-and-kept or not. Every plot and table follows the ticks. |
+| Show / Groups | Condition, the extra columns of `conditions.csv`, scanner, plate, merged or not, flagged-and-kept or not. Every plot and table follows the ticks. Groups are the *Colour by* category, optionally split by a second (*Then split by*, e.g. condition × day), shown as shades of the colour, as marker/line/bar styles, or as a colour each (`--split-by`, `--split-style` set the start). |
 | Preset views | *Lag histograms (all colonies)*; *Lag vs growth rate* and *Lag vs doubling time* (scatter with per-group histograms on both axes, colonies without a growth value in a labelled band); *Lag vs growth rate, by plate*. |
-| 1 − CDF card | Fraction of each group's colonies not yet appeared by time x (log axis by default); switchable to growth rate or doubling time. |
+| 1 − CDF card | Fraction of each group's colonies not yet appeared by time x; x and y each linear or log (log y by default); switchable to growth rate or doubling time. |
 | Tables | Spearman rho with permutation p per group, and Mann-Whitney / Kruskal-Wallis between groups, Holm-corrected, recomputed on what is shown. |
 
 "Lag" in the viewer is the appearance time (first detection), as the page's notes say. `--plotly inline` makes a

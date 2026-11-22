@@ -186,6 +186,63 @@ def test_cdf_module(tmp_path):
     assert "'grp' is not a numeric column" in str(e.value) and "scale must be" in str(e.value)
 
 
+def _render(page):
+    """Run a page in headless Chrome and return the JSON its probe script wrote."""
+    import json
+    try:
+        out = subprocess.run([_chrome(), "--headless=new", "--disable-gpu", "--no-sandbox", "--virtual-time-budget=10000", "--dump-dom", page.as_uri()],
+                             capture_output=True, text=True, encoding="utf-8", timeout=120).stdout
+    except subprocess.TimeoutExpired:
+        pytest.skip("Chrome did not finish")
+    m = re.search(r'<pre id="probe">(.*?)</pre>', out, re.S)
+    if m is None and "did not load" in out:
+        pytest.skip("Plotly could not be downloaded (offline)")
+    assert m, out[:500]
+    import html
+    text = html.unescape(m.group(1))
+    assert not text.startswith("ERROR"), text
+    return json.loads(text)
+
+
+SPLIT_PROBE = """<script>setTimeout(() => { const o = document.createElement('pre'); o.id = 'probe';
+try { const before = (document.getElementById('cdf-plot').data || []).length;
+  window.viewer.set_view({split_by: 'day', split_style: 'style'});
+  const tr = document.getElementById('cdf-plot').data;
+  document.querySelector('[data-cdf-axis=x][data-cdf-scale=log]').click();
+  o.textContent = JSON.stringify({ before, cdf: tr.map(t => t.name.split(' (')[0]), dashes: [...new Set(tr.map(t => t.line.dash))].length,
+    within: document.querySelectorAll('#t-within tbody tr').length, xlog: document.getElementById('cdf-plot').layout.xaxis.type,
+    view: window.viewer.describe_data().current_view.split_by });
+} catch (e) { o.textContent = 'ERROR ' + e.message; } document.body.appendChild(o); }, 2000);</script>"""
+
+
+@pytest.mark.skipif(_chrome() is None, reason="no Chrome for a headless render check")
+def test_split_groups_and_cdf_axes_in_the_browser(tmp_path):
+    df, spec = toy()
+    df["day"] = ["d1"] * 20 + ["d2"] * 20
+    spec["columns"]["day"] = {"label": "Day", "kind": "category", "order": ["d1", "d2"]}
+    spec["features"] = {"cdf": {"column": "x"}}
+    df["x"] = df["x"].abs() + 0.1
+    bv.write_viewer(df, spec, tmp_path / "s.html")
+    page = tmp_path / "s.html"
+    page.write_text(page.read_text(encoding="utf-8").replace("</body>", SPLIT_PROBE + "</body>"), encoding="utf-8")
+    got = _render(page)
+    assert got["before"] == 3                      # a, b and the odd group
+    # 3 groups x 2 days, minus the empty combination (the odd group's one row is on d1)
+    assert len(got["cdf"]) == 5 and "a · d1" in got["cdf"] and "b · d2" in got["cdf"]
+    assert got["dashes"] == 2 and got["within"] == 5 and got["xlog"] == "log" and got["view"] == "day"
+
+
+def test_split_spec_is_checked(tmp_path):
+    df, spec = toy()
+    spec["split_by"] = "x"
+    spec["split_style"] = "hue"
+    spec["views"][0]["split_by"] = "nope"
+    with pytest.raises(ValueError) as e:
+        bv.write_viewer(df, spec, tmp_path / "bad.html")
+    msg = str(e.value)
+    assert "split_by 'x' is not a category column" in msg and "split_style must be one of" in msg and "split_by 'nope'" in msg
+
+
 def copy_spec(spec):
     import copy
     return copy.deepcopy(spec)

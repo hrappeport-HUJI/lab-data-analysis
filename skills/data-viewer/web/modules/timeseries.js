@@ -75,7 +75,7 @@ TS.draw = () => {
       const s = ((TS.cfg.series || {})[sid] || {})[c.channel]; if (!s) continue;
       const off = c.x === "absolute" ? 0 : r[(d.events || {})[c.x]]; if (off == null) continue;
       const isP = pickedSid != null && sid === pickedSid, faded = picked && TS.fade && !isP;
-      const col = colorOf(state.colorBy, r[state.colorBy]);
+      const col = styleOf(groupKey(r), r).color;
       const tr = { type: "scattergl", mode: "lines", xaxis: "x" + ax, yaxis: "y" + ax, x: s.t.map(t => t - off), y: s.v, meta: (isP ? picked : r).i,
         line: { color: faded ? hexA(col, .16) : col, width: isP ? 3.2 : 1.2 }, opacity: faded ? 1 : (isP ? 1 : .8),
         hovertemplate: `<b>${label(isP ? picked : r)}</b><br>${sid}<br>%{x:.2f} h, %{y:.4g}<extra></extra>` };
