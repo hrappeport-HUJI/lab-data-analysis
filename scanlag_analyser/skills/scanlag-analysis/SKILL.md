@@ -1,6 +1,6 @@
 ---
 name: scanlag-analysis
-description: Analyze a ScanLag run (flatbed-scanner time-lapse of colonies on agar plates) with ScanLag Analyser, from its scan folder and a free-text description of the plates, ending in appearance-time and growth-rate histograms per condition and whole-plate colony counts. Checks the scans and time zero, finds TNTC plates and asks before excluding them, confirms the plate-to-condition map, runs the segmentation, tracking and QC report, opens the colony review and waits for it, exports training tiles from the review, then builds the histograms with the appearance-vs-growth control. Use whenever someone has a folder of scanner TIFFs (<prefix>_<scanner>_<YYYYMMDD>_<HHMM>.tiff) or asks for colony appearance times, lag, growth rates or colony counts from scanners.
+description: Analyze a ScanLag run (flatbed-scanner time-lapse of colonies on agar plates) with ScanLag Analyser, from its scan folder and a free-text description of the plates, ending in appearance-time and growth-rate histograms per condition, an interactive viewer and whole-plate colony counts. Checks the scans and time zero, finds TNTC plates and asks before excluding them, confirms the plate-to-condition map against the plates' handwritten labels, runs the segmentation, tracking and QC report, opens the colony review and waits for it, exports training tiles from the review, then builds the histograms with the appearance-vs-growth control and an interactive viewer (lag histograms, lag 1 − CDF, growth-rate histograms, growth rate vs lag with correlations, toggled by plate, condition and the experimenter's groupings). Use whenever someone has a folder of scanner TIFFs (<prefix>_<scanner>_<YYYYMMDD>_<HHMM>.tiff) or asks for colony appearance times, lag, growth rates or colony counts from scanners.
 metadata:
   status: draft
   code: scanlag_analyser (this skill's parent folder)
@@ -45,7 +45,7 @@ Tell the experimenter what you found: the scanners, scans per scanner, the inter
 python CODE/scripts/check_density.py RAW --out RESULTS
 ```
 
-It estimates the colonies in each plate's working area from the last scan, without the detector, in seconds per scanner: each changed patch counts as its area over a single colony's size, so clusters count as several colonies. On the developers' pilot, the colonies the pipeline later tracked were 0-20 % above this estimate. Open `RESULTS/density/<scanner>.png` and show the pictures to the experimenter together with the table. Each plate is circled green (ok), orange (dense: many colonies will merge) or red (TNTC, above 500 by default). The plates' handwritten labels are often readable in these pictures, which also helps with step 3.
+It estimates the colonies in each plate's working area from the last scan, without the detector, in seconds per scanner: each changed patch counts as its area over a single colony's size, so clusters count as several colonies. On the developers' pilot, the colonies the pipeline later tracked were 0-20 % above this estimate. Open `RESULTS/density/<scanner>.png` and show the pictures to the experimenter together with the table. Each plate is circled green (ok), orange (dense: many colonies will merge) or red (TNTC, above 500 by default). The plates' handwritten labels are often readable in these pictures; step 3 checks the plate map against them.
 
 Propose excluding the TNTC plates and ask for confirmation. Don't exclude anything without it, and don't decide about dense plates alone: merging makes their growth rates less reliable, but they may be the condition of interest. Record the decision as `--exclude SCANNER:PLATES` arguments for step 4.
 
@@ -56,6 +56,9 @@ The experimenter describes the plates in free text. Plates are numbered per scan
 - The condition of every plate that stays in, on every scanner. Plates without a condition are left out of the analysis, so say which.
 - What the replicates are, and whether plates of one condition on different scanners should be pooled.
 - Anything that changes time zero for some plates only (plated at another time, moved between scanners).
+- How they want the plates grouped beyond the condition, if at all (strain, medium, treatment, biological replicate, day). These become filters and colours in the viewer (step 7).
+
+**Check the description against the plates' own labels.** Read each plate's handwritten label in `RESULTS/density/<scanner>.png` (zoom in on the plate if needed) and compare it with the condition the experimenter gave for that plate. List any plate whose label doesn't match, or looks like another plate's label (a swap: columns reversed, scanners exchanged), and ask before writing `conditions.csv`. Say which labels you couldn't read; don't guess them. The labels support the experimenter's description but don't replace it: if they disagree, the experimenter decides. A swapped map gives clean-looking results with the conditions reversed, and nothing later catches it.
 
 Write `RESULTS/conditions.csv`, one row per condition and scanner (`CODE/README.md`, section 6):
 
@@ -64,6 +67,8 @@ condition,scanner,plates
 CTRL,1-4.3u,1-3
 GLU 0.2%,1-4.3u,4-6
 ```
+
+Groupings beyond the condition go in extra columns, one value per row, e.g. `condition,scanner,plates,strain,replicate`. The analysis ignores them; the viewer offers each as a filter and a colour. Split a row when its plates differ in a grouping.
 
 Show it back as a board per scanner (two columns of three, with each plate's handwritten label if readable) and get a confirmation. A mistake is cheapest to fix here.
 
@@ -126,10 +131,29 @@ Before reporting, check:
 - **The appearance-vs-growth control** (printed per condition, and `appearance_vs_growth_rho`, `_p`, `_n` in `analysis/summary.csv`). Appearance time is the first scan in which a colony is detected (a blob of about 10 px), not the end of its lag: on the developers' pilot, colonies were first seen at about 12 px, 1.5-2 h after the start back-extrapolated from their own growth, and the delay is shorter for fast growers. A clearly negative Spearman rho means appearance times partly reflect growth rate, so a difference in appearance between conditions can be a difference in growth rate; say so whenever conditions differ in both. Compare with the per-plate values in `qc/qc.csv` (`lag_growth_rho`): a pooled rho much stronger than the per-plate ones comes partly from differences between plates (pilot: -0.29 pooled, -0.09 to -0.18 per plate).
 - Every number you report comes from `analysis/summary.csv` or the colony tables.
 
-Report: scanners, time zero and the run time and device, excluded plates and why, the layout, the QC notes and what was done about them, per condition the plates, colonies, median appearance time and growth rate, colonies without growth estimates, whole-plate counts and possible doublets, bad frames, flagged colonies left unreviewed, the appearance-vs-growth control, the training tiles exported, and the paths of `histograms.html`, `qc/index.html` and the tables.
+## 7. Interactive viewer
+
+```
+python CODE/scripts/scanlag_viewer.py RESULTS
+```
+
+It writes `RESULTS/analysis/viewer.html`, one page that opens by double-click and can be sent to others (it needs internet for Plotly; add `--plotly inline` for a page that works offline). It is built with the data-viewer (`skills/data-viewer` in the `lab-data-analysis` repo, whose principles it follows; elsewhere set `DATA_VIEWER_DIR` to a copy). One point per included colony. The page holds:
+
+- **Show** and **Colour by**: condition, each extra grouping column of `conditions.csv`, scanner, plate, merged or not, flagged-and-kept or not. Unticking a plate or a condition updates every plot and statistic.
+- Preset views: **Lag histograms (all colonies)** (the top histograms, one lane per group), **Lag vs growth rate** (scatter, growth-rate histograms on the side, Spearman rho and permutation p per group, live), **Lag vs doubling time**, and **Lag vs growth rate, by plate**. Colonies without a growth value sit in a labelled band rather than being dropped.
+- A **1 − CDF** card under the plot: the fraction of each group's colonies not yet appeared by time x, on a log axis by default, so the late tail is visible. Its menu switches it to growth rate or doubling time.
+- Tables of the within-group correlations and the between-group comparisons (Mann-Whitney, Kruskal-Wallis, Holm-corrected), recomputed on what is shown.
+
+"Lag" in the viewer is the appearance time, and its notes say so. Use `--color-by` (e.g. a strain column) when the experimenter's main comparison is not the condition.
+
+Before handing it over, open it yourself or check it with a headless browser: every condition appears with the expected colony count, the 1 − CDF curves start at 1, and the within-group correlations in the lag-vs-growth view match the `control` lines of step 6.
+
+## Report
+
+Report: scanners, time zero and the run time and device, excluded plates and why, the layout, the QC notes and what was done about them, per condition the plates, colonies, median appearance time and growth rate, colonies without growth estimates, whole-plate counts and possible doublets, bad frames, flagged colonies left unreviewed, the appearance-vs-growth control, the training tiles exported, and the paths of `viewer.html`, `histograms.html`, `qc/index.html` and the tables.
 
 Pitfalls: read the colony tables' flag column as `df["flags"]` (`df.flags` is a pandas attribute); review decisions live in `colonies.parquet` (`status`, `flags_reviewed`), and `review.json` is only their log.
 
-## 7. Keep a record
+## 8. Keep a record
 
-Ask whether and where the run should be written up (a lab notebook, an electronic notebook, a results note). If a local setup says how, follow it. Point to `RAW` and `RESULTS` rather than copying scans or result tables into the notes; a static picture of the histograms is usually enough as the key figure.
+Ask whether and where the run should be written up (a lab notebook, an electronic notebook, a results note). If a local setup says how, follow it. Point to `RAW` and `RESULTS` rather than copying scans or result tables into the notes; a static picture of the histograms or of a viewer view (its camera icon saves an SVG) is usually enough as the key figure, with the path of `viewer.html`.
