@@ -9,13 +9,13 @@
 //   show: [0, 1, 2],   // panels shown at first (indices into panels), each a separate subplot
 //   max_panels: 6,
 // }
-const TS = { cfg: null, choice: [], n: 0, fade: true };
+const TS = { cfg: null, choice: [], n: 0 };
 TS.def = k => TS.cfg.panels[k];
 TS.channelsOf = def => (def.channels && def.channels.length ? def.channels : Object.keys(TS.cfg.channels || {}));
 TS.defaultChoice = k => { const d = TS.def(k), ch = TS.channelsOf(d);
   return { panel: k, channel: d.channel && ch.includes(d.channel) ? d.channel : ch[0], x: d.x || "absolute", scale: d.scale || (TS.cfg.channels[d.channel || ch[0]] || {}).scale || "linear" }; };
 TS.store = () => STORE + ":timeseries";
-TS.save = () => { try { localStorage.setItem(TS.store(), JSON.stringify({ choice: TS.choice, n: TS.n, fade: TS.fade })); } catch (e) {} };
+TS.save = () => { try { localStorage.setItem(TS.store(), JSON.stringify({ choice: TS.choice, n: TS.n })); } catch (e) {} };
 
 TS.init = cfg => {
   TS.cfg = cfg; const P = cfg.panels || [];
@@ -25,18 +25,17 @@ TS.init = cfg => {
   TS.choice = Array.from({ length: max }, (_, i) => TS.defaultChoice(show[i] ?? i % P.length));
   TS.n = show.length;
   try { const s = JSON.parse(localStorage.getItem(TS.store()) || "null");
-    if (s && Array.isArray(s.choice)) { s.choice.forEach((c, i) => { if (i < max && P[c.panel]) TS.choice[i] = { ...TS.defaultChoice(c.panel), ...c }; }); TS.n = Math.max(1, Math.min(max, s.n | 0 || TS.n)); TS.fade = s.fade !== false; } } catch (e) {}
+    if (s && Array.isArray(s.choice)) { s.choice.forEach((c, i) => { if (i < max && P[c.panel]) TS.choice[i] = { ...TS.defaultChoice(c.panel), ...c }; }); TS.n = Math.max(1, Math.min(max, s.n | 0 || TS.n)); } } catch (e) {}
   const nsel = document.getElementById("ts-n");
   nsel.innerHTML = Array.from({ length: max }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join("");
   nsel.onchange = () => { TS.n = +nsel.value; TS.save(); TS.controls(); TS.draw(); };
-  const fade = document.getElementById("ts-fade"); fade.onchange = () => { TS.fade = fade.checked; TS.save(); TS.draw(); };
   document.getElementById("ts-clear").onclick = () => setSelection([]);
   TS.controls(); TS.draw();
   document.getElementById("ts-plot").on("plotly_click", ev => { const p = ev.points && ev.points[0]; if (p && p.data && p.data.meta != null) clickRow(ROWS[p.data.meta], ev.event); });
 };
 
 TS.controls = () => {
-  document.getElementById("ts-n").value = String(TS.n); document.getElementById("ts-fade").checked = TS.fade;
+  document.getElementById("ts-n").value = String(TS.n);
   const box = document.getElementById("ts-controls"); box.replaceChildren();
   for (let i = 0; i < TS.n; i++) {
     const c = TS.choice[i], d = TS.def(c.panel), row = document.createElement("div"); row.className = "ts-row";
@@ -74,7 +73,7 @@ TS.draw = () => {
     for (const r of rows) {
       const sid = r[d.series_col]; if (sid == null || seen.has(sid)) continue; seen.add(sid);
       const s = ((TS.cfg.series || {})[sid] || {})[c.channel]; if (!s) continue;
-      const hr = hlBySid.get(sid), isP = !!hr, faded = SEL.size > 0 && TS.fade && !isP;
+      const hr = hlBySid.get(sid), isP = !!hr, faded = SEL.size > 0 && state.fade && !isP;
       const rr = isP ? hr : r, off = c.x === "absolute" ? 0 : rr[(d.events || {})[c.x]]; if (off == null) continue;
       const col = colorOf(state.colorBy, r[state.colorBy]);
       const tr = { type: "scattergl", mode: "lines", xaxis: "x" + ax, yaxis: "y" + ax, x: s.t.map(t => t - off), y: s.v, meta: (isP ? hr : r).i,

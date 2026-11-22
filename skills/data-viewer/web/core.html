@@ -54,6 +54,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .sw { width: 12px; height: 12px; border-radius: 3px; flex: none; display: inline-block; }
 .fgroup { display: grid; gap: 4px; }
 .frow { display: grid; grid-template-columns: auto auto 1fr auto; gap: 7px; align-items: center; font-size: 13px; }
+.fname { border: 1px solid transparent; background: none; color: var(--ink); font: inherit; font-size: 13px; text-align: left; padding: 1px 5px; margin-left: -5px; border-radius: 4px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fname:hover { border-color: var(--line); }
+.fname[aria-pressed=true] { background: var(--you); border-color: var(--accent); }
+.plotbar { display: flex; flex-wrap: wrap; gap: 6px 22px; align-items: center; font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+.plotbar .grp { display: inline-flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.plotbar b { color: var(--ink); font-weight: 600; }
+.plotbar input[type=number] { width: 4.5em; }
+.linkbtn { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12.5px; cursor: pointer; padding: 0; }
+.linkbtn:disabled { color: var(--muted); cursor: default; }
 .fhead { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); }
 .fhead button { border: 0; background: none; color: var(--accent); font: inherit; font-size: 11.5px; cursor: pointer; padding: 0; }
 .count { font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -94,7 +103,7 @@ td.name { font-family: var(--sans); font-size: 12.5px; }
 
 <div class="wrap">
   <aside class="rail">
-    <fieldset id="filters"><legend>Show</legend></fieldset>
+    <fieldset id="filters"><legend>Groups</legend><p class="hint" style="margin:0 0 4px">Tick to show a group; click its name to highlight it (Shift-, Ctrl- or ⌘-click to add another).</p></fieldset>
     <fieldset><legend>Colour by</legend><select id="colorby" aria-label="Colour by"></select></fieldset>
     <fieldset><legend>Axes</legend>
       <div class="axis" id="axis-x"></div>
@@ -108,22 +117,7 @@ td.name { font-family: var(--sans); font-size: 12.5px; }
       <label><input type="checkbox" id="limfilter"> Statistics use only points inside the limits</label>
       <label><input type="checkbox" id="showexcl" checked> Show removed points as grey crosses</label>
       <label><input type="checkbox" id="trend" checked> Trend lines (linear axes)</label>
-      <p class="hint">Click a point to see all its values; you can remove it from the plot and the statistics there.</p>
-    </fieldset>
-    <fieldset><legend>Highlight</legend>
-      <p class="hint" style="margin:0">Click a point to highlight it; click it again to clear. Shift-, Ctrl- or ⌘-click adds or removes points. Esc clears.</p>
-      <div class="row2"><select id="hl-col" aria-label="Highlight a group: column"></select><select id="hl-val" aria-label="Highlight a group: value"></select></div>
-      <div class="row2"><button class="btn" id="hl-set" type="button">Highlight group</button><button class="btn" id="hl-add" type="button">Add group</button></div>
-      <label><input type="checkbox" id="fade" checked> Fade the other points</label>
-      <div class="row2"><span class="count" id="hl-count"></span><button class="btn" id="hl-clear" type="button">Clear highlight</button></div>
-    </fieldset>
-    <fieldset><legend>Histograms</legend>
-      <label><input type="checkbox" id="showhist" checked> Show marginal histograms</label>
-      <div class="seg" role="group" aria-label="Histogram layout">
-        <button type="button" data-hist="lanes" aria-pressed="true">Lane per group</button>
-        <button type="button" data-hist="overlay" aria-pressed="false">Overlaid</button>
-      </div>
-      <div class="row3"><span>bins</span><input type="number" id="bins" value="22" min="5" max="80" aria-label="Number of bins"><span></span></div>
+      <p class="hint">Click a point to highlight it and see all its values; click it again to clear. Shift-, Ctrl- or ⌘-click adds or removes points. The point's card can remove it from the plot and the statistics.</p>
     </fieldset>
     <fieldset><legend>My views</legend>
       <div class="row2"><button class="btn" id="saveview" type="button">Save this view</button><button class="btn" id="copyview" type="button">Copy as text</button></div>
@@ -133,8 +127,15 @@ td.name { font-family: var(--sans); font-size: 12.5px; }
 
   <main class="stack">
     <div class="card">
+      <div class="plotbar">
+        <span class="grp"><b>Highlight</b><span id="hl-count"></span><button class="linkbtn" id="hl-clear" type="button">clear (Esc)</button>
+          <label><input type="checkbox" id="fade" checked> fade the rest</label></span>
+        <span class="grp"><label><input type="checkbox" id="showhist" checked> <b>Histograms</b></label>
+          <span class="seg" role="group" aria-label="Histogram layout"><button type="button" data-hist="lanes" aria-pressed="true">Lane per group</button><button type="button" data-hist="overlay" aria-pressed="false">Overlaid</button></span>
+          <label>bins <input type="number" id="bins" value="22" min="5" max="80" aria-label="Number of bins"></label></span>
+      </div>
       <div id="plot"></div>
-      <p class="hint"><span id="hist-hint">Histograms: fraction of each group, same scale in every lane; solid line = median, dotted = mean. </span>Drag to zoom (sets the limits), double-click to reset, the camera icon saves an SVG.</p>
+      <p class="hint"><span id="hist-hint">Histograms: fraction of each group, same scale in every lane; solid line = median, dotted = mean. </span>Click a legend entry to highlight that colour group. Drag to zoom (sets the limits), double-click to reset, the camera icon saves an SVG.</p>
       <div class="note" id="note"></div>
       <div class="pick" id="pick" hidden></div>
     </div>
@@ -356,7 +357,9 @@ function draw() {
       customdata: arr.map(r => r.i), hovertext: arr.map(r => hover(r) + `<br><i>${state.excluded.has(r.id) ? "click to put back" : "click to remove"}</i>`), hoverinfo: "text", ...extra });
     const solid = used.filter(r => !when(S.hollow_when, r)), hollow = used.filter(r => when(S.hollow_when, r));
     const shade = arr => arr.map(r => dim(r) ? hexA(col, .15) : hexA(col, .85));
-    traces.push(pt(solid, { name: `${g} (${used.length})`, marker: { color: shade(solid), symbol: sym, size: 8, line: { color: panel, width: .6 } } }));
+    // legend entry on its own (full colour) so fading the points never fades the legend
+    traces.push({ type: "scattergl", mode: "markers", x: [null], y: [null], name: `${g} (${used.length})`, legendgroup: g, hoverinfo: "skip", marker: { color: col, symbol: sym, size: 8 } });
+    traces.push(pt(solid, { showlegend: false, marker: { color: shade(solid), symbol: sym, size: 8, line: { color: panel, width: .6 } } }));
     if (hollow.length) traces.push(pt(hollow, { showlegend: false, marker: { color: col, symbol: sym + "-open", size: 8, line: { color: shade(hollow), width: 1.4 } } }));
     const ringed = used.filter(r => when(S.ring_when, r));
     if (ringed.length) traces.push({ ...pt(ringed, { showlegend: false, marker: { color: ink, symbol: "circle-open", size: 15, line: { color: ink, width: 1.2 } } }) });
@@ -463,9 +466,11 @@ function buildControls() {
     const wrap = document.createElement("div"); wrap.className = "fgroup";
     wrap.innerHTML = `<div class="fhead"><span>${L(c)}</span><span><button type="button" data-all>all</button> · <button type="button" data-none>none</button></span></div>`;
     COLS[c].order.forEach(v => { const n = ROWS.filter(r => r[c] === v).length;
-      const row = document.createElement("label"); row.className = "frow";
-      row.innerHTML = `<input type="checkbox"><span class="sw" style="background:${colorOf(c, v)}"></span><span></span><span class="count">${n}</span>`;
-      row.children[2].textContent = v; const cbx = row.querySelector("input"); cbx.dataset.col = c; cbx.dataset.val = v;
+      const row = document.createElement("div"); row.className = "frow";
+      row.innerHTML = `<input type="checkbox"><span class="sw" style="background:${colorOf(c, v)}"></span><button type="button" class="fname"></button><span class="count">${n}</span>`;
+      const nb = row.querySelector(".fname"); nb.textContent = v; nb.title = `Highlight ${L(c)} = ${v}`; nb.dataset.col = c; nb.dataset.val = v;
+      nb.onclick = e => highlightGroup(c, v, e);
+      const cbx = row.querySelector("input"); cbx.dataset.col = c; cbx.dataset.val = v; cbx.setAttribute("aria-label", `Show ${L(c)} ${v}`);
       cbx.onchange = () => { cbx.checked ? state.filters[c].add(v) : state.filters[c].delete(v); draw(); }; wrap.appendChild(row); });
     wrap.querySelector("[data-all]").onclick = () => { state.filters[c] = new Set(COLS[c].order); draw(); };
     wrap.querySelector("[data-none]").onclick = () => { state.filters[c] = new Set(); draw(); };
@@ -487,13 +492,6 @@ function buildControls() {
   const bind = (id, k, num) => { const el = document.getElementById(id); el.onchange = () => { state[k] = num ? +el.value : el.checked; draw(); }; };
   bind("outliers", "outliers"); bind("fence", "fence", true); bind("band", "band"); bind("limfilter", "limfilter"); bind("showexcl", "showexcl"); bind("trend", "trend"); bind("bins", "bins", true);
   document.querySelectorAll("[data-hist]").forEach(b => b.onclick = () => { state.hist = b.dataset.hist; draw(); });
-  const hc = document.getElementById("hl-col"), hv = document.getElementById("hl-val");
-  hc.innerHTML = CAT.map(c => `<option value="${c}">${L(c)}</option>`).join("");
-  const fillVals = () => { hv.replaceChildren(...COLS[hc.value].order.map(v => { const o = document.createElement("option"); o.value = v; o.textContent = `${v} (${ROWS.filter(r => r[hc.value] === v).length})`; return o; })); };
-  hc.value = state.colorBy; fillVals(); hc.onchange = fillVals;
-  const groupIds = () => ROWS.filter(r => r[hc.value] === hv.value && passFilters(r)).map(r => r.id);
-  document.getElementById("hl-set").onclick = () => setSelection(groupIds());
-  document.getElementById("hl-add").onclick = () => setSelection(groupIds(), { add: true });
   document.getElementById("hl-clear").onclick = () => setSelection([]);
   bind("fade", "fade"); bind("showhist", "showhist");
   document.getElementById("restore").onclick = () => { state.excluded.clear(); saveExcluded(); draw(); };
@@ -524,7 +522,10 @@ function syncControls() {
   document.querySelectorAll("[data-hist]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.hist === state.hist)));
   document.querySelectorAll("#filters input[type=checkbox]").forEach(c => c.checked = state.filters[c.dataset.col].has(c.dataset.val));
   for (const k of ["outliers", "band", "limfilter", "showexcl", "trend", "fade", "showhist"]) document.getElementById(k).checked = state[k];
-  document.getElementById("hl-count").textContent = state.selected.size ? `${state.selected.size} highlighted` : "none highlighted";
+  document.getElementById("hl-count").textContent = state.selected.size ? `${state.selected.size} row${state.selected.size > 1 ? "s" : ""}` : "none";
+  document.getElementById("hl-clear").disabled = !state.selected.size;
+  document.querySelectorAll(".fname").forEach(b => { const ids = ROWS.filter(r => r[b.dataset.col] === b.dataset.val && passFilters(r) && !state.excluded.has(r.id));
+    b.setAttribute("aria-pressed", String(ids.length > 0 && ids.every(r => state.selected.has(r.id)))); });
   document.querySelectorAll("[data-hist], #bins").forEach(el => el.disabled = !state.showhist);
   document.getElementById("hist-hint").hidden = !state.showhist;
 }
@@ -536,6 +537,12 @@ function setSelection(ids, { add = false } = {}) {
   const last = ids.length ? ROWS.find(r => r.id === ids[ids.length - 1]) : null;
   showPick(state.selected.size ? (last && state.selected.has(last.id) ? last : ROWS.find(r => state.selected.has(r.id))) : null);
   hook("selected", [...state.selected]);
+}
+function highlightGroup(col, val, ev) {
+  const ids = ROWS.filter(r => r[col] === val && passFilters(r) && !state.excluded.has(r.id)).map(r => r.id);
+  const all = ids.length && ids.every(id => state.selected.has(id));
+  if (ev && (ev.shiftKey || ev.metaKey || ev.ctrlKey)) { if (all) { ids.forEach(id => state.selected.delete(id)); setSelection([...state.selected]); } else setSelection(ids, { add: true }); }
+  else if (all && ids.length === state.selected.size) setSelection([]); else setSelection(ids);
 }
 function clickRow(r, ev) {
   const multi = ev && (ev.shiftKey || ev.metaKey || ev.ctrlKey);
@@ -558,13 +565,16 @@ function showPick(r, redraw = true) {
   head.append(rm, x); box.append(head);
   const keys = [...new Set([state.x, state.y, state.colorBy,...(S.hover || []), ...Object.keys(COLS)])].filter(k => COLS[k]);
   const dl = document.createElement("dl");
-  for (const k of keys) { const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = COLS[k].short || COLS[k].label; dd.textContent = fmtVal(k, r[k]); dl.append(dt, dd); }
+  for (const k of keys) { const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = COLS[k].short || COLS[k].label; dd.textContent = fmtVal(k, r[k]);
+    const pair = document.createElement("div"); pair.append(dt, dd); dl.append(pair); }  // one grid cell per label + value, so they stay together
   box.append(dl);
 }
 function bindPlot() {
   const el = document.getElementById("plot");
   el.on("plotly_click", ev => { const p = ev.points && ev.points[0]; if (!p || p.customdata == null) return;
     clickRow(ROWS[p.customdata], ev.event); });
+  el.on("plotly_legendclick", ev => { const g = ev.data[ev.curveNumber]?.legendgroup; if (g != null) highlightGroup(state.colorBy, g, ev.event); return false; });
+  el.on("plotly_legenddoubleclick", () => false);
   document.addEventListener("keydown", e => { if (e.key === "Escape" && state.selected.size && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName || "")) setSelection([]); });
   el.on("plotly_relayout", ev => {
     if (ev["xaxis.autorange"] || ev["yaxis.autorange"]) { state.lim = { x: [null, null], y: [null, null] }; setTimeout(draw, 0); return; }

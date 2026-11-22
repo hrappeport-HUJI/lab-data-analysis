@@ -191,6 +191,6 @@ def test_highlight_and_histogram_toggle(tmp_path):
     bv.write_viewer(df, spec, tmp_path / "h.html")
     page = (tmp_path / "h.html").read_text(encoding="utf-8")
     assert 'id="showhist"' in page and "showhist: S.histograms !== false" in page
-    assert 'id="hl-set"' in page and "function setSelection(" in page and "function clickRow(" in page
+    assert 'class="fname"' in page and "function highlightGroup(" in page and "plotly_legendclick" in page and "function setSelection(" in page and "function clickRow(" in page
     assert 'name: "highlight_rows"' in page and "highlight_rows({ids | where, add, clear})" in page
     assert '"histograms":false' in page
