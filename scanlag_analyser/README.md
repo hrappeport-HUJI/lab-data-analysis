@@ -18,6 +18,13 @@ For every scanner in an experiment it:
 
 The raw scans are **only ever read**. Every output goes to a separate results folder.
 
+**With an AI agent.** `skills/scanlag-analysis/SKILL.md` is an agent skill (the open `SKILL.md` format used by
+Claude Code, Codex and others) that walks an agent through a whole run: checking the scans and time zero,
+TNTC plates, the plate-to-condition map, the pipeline and QC report, pausing for your review, and the
+histograms with their sanity checks. Copy or link the `skills/scanlag-analysis` folder into your agent's
+skills folder (e.g. `~/.claude/skills/`), or tell the agent to read the file. A lab can wrap it in its own
+skill that adds local paths and record-keeping.
+
 ---
 
 ## Contents
