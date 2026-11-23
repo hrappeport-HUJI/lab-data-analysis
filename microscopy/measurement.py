@@ -17,15 +17,17 @@ def measure(project, run_id, data, founders):
     for n in data["observations"]:
         frames[(n["field"], n["frame"])].append(n)
 
-    @lru_cache(maxsize=8)
-    def cached_mask(oid):
+    @lru_cache(maxsize=32)
+    def cached_polygon_mask(oid):
         return observation_mask(project, run_id, nodes[oid])
 
     def mask(node):
-        return cached_mask(node["id"])
+        if "polygon" in node or "labels_file" not in node:
+            return cached_polygon_mask(node["id"])
+        return observation_mask(project, run_id, node)
 
     @lru_cache(maxsize=4)
-    def occupied_frame(field, frame):
+    def frame_state(field, frame):
         shape = project.frames[(field, frame, cfg["structure_channel"])]["shape"]
         frame_nodes = frames[(field, frame)]
         canonical = [n for n in frame_nodes if "labels_file" in n]
@@ -34,6 +36,9 @@ def measure(project, run_id, data, founders):
             labels = label_image(
                 project, run_id, {"labels_file": plane} if plane else canonical[0]
             )
+            has_polygons = any("polygon" in n for n in frame_nodes)
+            if not has_polygons:
+                return labels, None
             occupied = labels > 0
             for n in canonical:
                 if "polygon" in n:
@@ -41,11 +46,11 @@ def measure(project, run_id, data, founders):
             for n in frame_nodes:
                 if "polygon" in n:
                     occupied |= mask(n)
-            return occupied
+            return labels, occupied
         occupied = np.zeros(shape, bool)
         for other in frame_nodes:
             occupied |= mask(other)
-        return occupied
+        return None, occupied
 
     output = []
     recipes = cfg.get("measurements", [])
@@ -156,14 +161,31 @@ def measure(project, run_id, data, founders):
             output.append(row)
             continue
         image = read_frame(project, *key)
-        cell = mask(node)
-        occupied = occupied_frame(node["field"], node["frame"])
         shift = recipe.get("channel_shift_yx_px", [0, 0])
         if len(shift) != 2 or any(not float(v).is_integer() for v in shift):
             raise ValueError(
                 "Initial implementation supports integer channel-mask shifts only"
             )
+        inner = int(recipe.get("background_inner_px", 3))
+        outer = int(recipe.get("background_outer_px", 10))
+        if not 0 < inner < outer:
+            raise ValueError("Background annulus requires 0 < inner < outer")
+        # All annulus pixels lie within outer pixels of the cell bbox.
+        # Crop only the calculation, retaining original masks and coordinates.
+        x0, y0, x1, y1 = node["bbox"]
+        dy, dx = map(int, shift)
+        region = (
+            slice(max(0, y0 + dy - outer), min(image.shape[0], y1 + dy + outer)),
+            slice(max(0, x0 + dx - outer), min(image.shape[1], x1 + dx + outer)),
+        )
+        labels, occupied_full = frame_state(node["field"], node["frame"])
         if any(shift):
+            cell = (
+                labels == node["label"]
+                if "polygon" not in node and labels is not None
+                else mask(node)
+            )
+            occupied = occupied_full if occupied_full is not None else (labels > 0)
             shifted = (
                 ndimage.shift(
                     cell.astype("uint8"),
@@ -189,19 +211,24 @@ def measure(project, run_id, data, founders):
                 )
                 > 0
             )
-        inner = int(recipe.get("background_inner_px", 3))
-        outer = int(recipe.get("background_outer_px", 10))
-        if not 0 < inner < outer:
-            raise ValueError("Background annulus requires 0 < inner < outer")
-        # All annulus pixels lie within outer pixels of the cell bbox.
-        # Crop only the calculation, retaining original masks and coordinates.
-        x0, y0, x1, y1 = node["bbox"]
-        dy, dx = map(int, shift)
-        region = (
-            slice(max(0, y0 + dy - outer), min(image.shape[0], y1 + dy + outer)),
-            slice(max(0, x0 + dx - outer), min(image.shape[1], x1 + dx + outer)),
-        )
-        image, cell, occupied = image[region], cell[region], occupied[region]
+            image, cell, occupied = image[region], cell[region], occupied[region]
+        else:
+            image = image[region]
+            if "polygon" not in node and labels is not None:
+                labels_crop = labels[region]
+                cell = labels_crop == node["label"]
+                occupied = (
+                    occupied_full[region]
+                    if occupied_full is not None
+                    else (labels_crop > 0)
+                )
+            else:
+                cell = mask(node)[region]
+                occupied = (
+                    occupied_full[region]
+                    if occupied_full is not None
+                    else (labels[region] > 0)
+                )
         ring = (
             ndimage.binary_dilation(cell, iterations=outer)
             & ~ndimage.binary_dilation(cell, iterations=inner)

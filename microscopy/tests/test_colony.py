@@ -326,3 +326,109 @@ def test_oversized_run_file_is_refused_before_loading(tmp_path):
     check_loadable(path)  # small: fine
     with pytest.raises(MemoryError, match="needs about"):
         check_loadable(path, expansion=10**9)
+
+
+def test_vectorized_centroids_and_pair_hashing_match_reference():
+    from scipy import ndimage
+    from microscopy.colony import _centroids
+
+    rng = np.random.default_rng(123)
+    labels = rng.integers(0, 60, size=(96, 128), dtype=np.int32)
+    labels[labels % 3 == 0] = 0  # non-consecutive labels with gaps
+    index = np.arange(1, int(labels.max()) + 1)
+    present = np.bincount(labels.ravel(), minlength=len(index) + 1)[1:] > 0
+    expected = np.array(ndimage.center_of_mass(labels > 0, labels, index[present]))
+    actual = _centroids(labels)
+    assert np.array_equal(actual, expected)
+    assert _centroids(np.zeros((16, 16), np.int32)).shape == (0, 2)
+
+    # Verify 1D pair hashing matches 2D np.unique(axis=1)
+    L = rng.integers(0, 80, size=(96, 128), dtype=np.int64)
+    K = rng.integers(0, 120, size=(96, 128), dtype=np.int64)
+    both = (L > 0) & (K > 0)
+    expected_owners = {}
+    for o, c in np.unique(np.stack([L[both], K[both]]), axis=1).T:
+        expected_owners.setdefault(int(o), set()).add(int(c))
+    actual_owners = {}
+    lb, kb = L[both], K[both]
+    stride = int(kb.max()) + 1
+    for pair in np.unique(lb * stride + kb):
+        o, c = divmod(int(pair), stride)
+        actual_owners.setdefault(o, set()).add(c)
+    assert actual_owners == expected_owners
+
+
+def test_vectorized_node_extraction_and_zlib1_npz_match_reference(tmp_path):
+    from scipy import ndimage
+    from microscopy.pipeline import _extract_nodes, _save_labels_npz
+
+    rng = np.random.default_rng(456)
+    labels = rng.integers(0, 45, size=(64, 80), dtype=np.int32)
+    labels[labels % 4 == 0] = 0
+    expected = []
+    for label, region in enumerate(ndimage.find_objects(labels), 1):
+        if region is None:
+            continue
+        yy, xx = np.where(labels[region] == label)
+        yy += region[0].start
+        xx += region[1].start
+        expected.append({
+            "id": f"f0-t5-o{label}",
+            "field": "1",
+            "frame": 5,
+            "time_s": 300,
+            "label": int(label),
+            "labels_file": "labels/0000_000000005.npz",
+            "x": float(xx.mean()),
+            "y": float(yy.mean()),
+            "area_px": int(len(xx)),
+            "bbox": [int(xx.min()), int(yy.min()), int(xx.max()) + 1, int(yy.max()) + 1],
+        })
+    actual = _extract_nodes(labels, 0, "1", 5, 300, "labels/0000_000000005.npz")
+    assert actual == expected
+    assert _extract_nodes(np.zeros((32, 32), np.int32), 0, "1", 0, 0, "labels/x.npz") == []
+
+    npz_path = tmp_path / "test_plane.npz"
+    with open(npz_path, "wb") as stream:
+        _save_labels_npz(stream, labels)
+    with np.load(npz_path) as loaded:
+        assert np.array_equal(loaded["labels"], labels.astype(np.uint16))
+
+
+def test_skip_pairwise_links_in_colony_mode_and_digest_cache(tmp_path, monkeypatch):
+    import microscopy.images as images_mod
+    from microscopy.measurement import measure
+
+    project = create(tmp_path / "demo")
+    project.config["segmentation"].update(adapter="watershed", threshold_from_first_frame=False)
+    project.config["tracking"].update(events="colony", colony={"min_colony_growth": 0.0})
+    with_links = run(project, fields=["1"])
+    assert len(with_links["edges"]) > 0
+
+    project.config["tracking"]["skip_pairwise_links"] = True
+    no_links = run(project, fields=["1"])
+    assert no_links["edges"] == []
+    assert no_links["founder_events"] == with_links["founder_events"]
+
+    # Verify measurement equivalence with polygon override and channel shift
+    d1 = materialize(project, with_links["run_id"], [])
+    d2 = materialize(project, no_links["run_id"], [])
+    f1 = summarize(project, d1)
+    f2 = summarize(project, d2)
+    assert measure(project, with_links["run_id"], d1, f1) == measure(project, no_links["run_id"], d2, f2)
+
+    project.config["measurements"][0]["channel_shift_yx_px"] = [1, -1]
+    assert measure(project, with_links["run_id"], d1, f1) == measure(project, no_links["run_id"], d2, f2)
+
+    # Verify SHA-256 file_digest is called once per unique (path, mtime, size) even across _read cache evictions
+    images_mod._read.cache_clear()
+    images_mod._verified_digest.cache_clear()
+    digest_calls = []
+    real_digest = images_mod.file_digest
+    monkeypatch.setattr(images_mod, "file_digest", lambda p: digest_calls.append(p) or real_digest(p))
+    key = ("1", 0, "phase")
+    _ = images_mod.read_frame(project, *key)
+    images_mod._read.cache_clear()  # force pixel LRU eviction
+    _ = images_mod.read_frame(project, *key)
+    assert len(digest_calls) == 1
+

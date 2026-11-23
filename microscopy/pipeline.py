@@ -9,6 +9,7 @@ import time
 import multiprocessing
 import json
 import subprocess
+import zipfile
 from pathlib import Path
 import numpy as np
 from scipy import ndimage
@@ -163,6 +164,47 @@ def _sidecar(directory, fi, frame):
     return directory / "prepared" / f"{fi:04}_{frame:09}.json"
 
 
+def _save_labels_npz(stream, labels):
+    array = labels.astype(np.uint16) if labels.max(initial=0) < 65536 else labels
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+        with archive.open("labels.npy", "w") as entry:
+            np.lib.format.write_array(entry, array, allow_pickle=False)
+
+
+def _extract_nodes(labels, fi, field, frame, time_s, label_file):
+    regions = ndimage.find_objects(labels)
+    if not regions:
+        return []
+    flat = labels.ravel()
+    nz = np.flatnonzero(flat)
+    if not nz.size:
+        return []
+    v = flat[nz]
+    areas = np.bincount(v)
+    y, x = np.divmod(nz, labels.shape[1])
+    ysum = np.bincount(v, weights=y)
+    xsum = np.bincount(v, weights=x)
+    current = []
+    for label, region in enumerate(regions, 1):
+        if region is None:
+            continue
+        area = int(areas[label])
+        ys, xs = region
+        current.append({
+            "id": f"f{fi}-t{frame}-o{label}",
+            "field": field,
+            "frame": frame,
+            "time_s": time_s,
+            "label": int(label),
+            "labels_file": label_file,
+            "x": float(xsum[label] / area),
+            "y": float(ysum[label] / area),
+            "area_px": area,
+            "bbox": [int(xs.start), int(ys.start), int(xs.stop), int(ys.stop)],
+        })
+    return current
+
+
 def _prepare_frame(job, *, state=None):
     p, cfg, segmenter, directory = state if state is not None else _WORKER
     fi, field, record, fsp, reuse = job
@@ -203,39 +245,14 @@ def _prepare_frame(job, *, state=None):
         fd, temporary = tempfile.mkstemp(prefix=".labels-", suffix=".npz", dir=directory / "labels")
         try:
             with os.fdopen(fd, "wb") as stream:
-                np.savez_compressed(stream, labels=labels.astype(np.uint16)
-                                    if labels.max(initial=0) < 65536 else labels)
+                _save_labels_npz(stream, labels)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, directory / label_file)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        for label, region in enumerate(ndimage.find_objects(labels), 1):
-            if region is None:
-                continue
-            yy, xx = np.where(labels[region] == label)
-            yy += region[0].start
-            xx += region[1].start
-            oid = f"f{fi}-t{frame}-o{label}"
-            node = {
-                "id": oid,
-                "field": field,
-                "frame": frame,
-                "time_s": record["time_s"],
-                "label": int(label),
-                "labels_file": label_file,
-                "x": float(xx.mean()),
-                "y": float(yy.mean()),
-                "area_px": int(len(xx)),
-                "bbox": [
-                    int(xx.min()),
-                    int(yy.min()),
-                    int(xx.max()) + 1,
-                    int(yy.max()) + 1,
-                ],
-            }
-            current.append(node)
+        current = _extract_nodes(labels, fi, field, frame, record["time_s"], label_file)
     # These sidecars are produced afresh for this run, never trusted across resumes.
     # A completion marker is published only after its atomic label-plane replacement.
     write_json(_sidecar(directory, fi, frame),
@@ -255,6 +272,7 @@ def _follow_field(job):
     threshold_used = plan["threshold_used"]
     colony = ColonyEvents(tp.get("colony")) if tp.get("events") == "colony" else None
     colony_started = False
+    skip_links = colony is not None and bool(tp.get("skip_pairwise_links", False))
 
     for record in records:
         frame = record["frame"]
@@ -311,19 +329,20 @@ def _follow_field(job):
                 colony.start(frame, labels, current, founders)
                 colony_started = True
         step = int(cfg.get("expected_frame_step", 1))
-        if (previous or type(tracker).__name__ == "CellLineageTracker") and last_frame is not None and (frame == last_frame + step or
-                (type(tracker).__name__ == "CellLineageTracker" and frame == last_frame + 2 * step)):
-            edges.extend(
-                tracker.link(
-                    previous,
-                    current,
-                    previous_labels=previous_labels,
-                    current_labels=labels,
-                    parameters=tp,
+        if not skip_links:
+            if (previous or type(tracker).__name__ == "CellLineageTracker") and last_frame is not None and (frame == last_frame + step or
+                    (type(tracker).__name__ == "CellLineageTracker" and frame == last_frame + 2 * step)):
+                edges.extend(
+                    tracker.link(
+                        previous,
+                        current,
+                        previous_labels=previous_labels,
+                        current_labels=labels,
+                        parameters=tp,
+                    )
                 )
-            )
-        elif type(tracker).__name__ == "CellLineageTracker":
-            tracker.reset()
+            elif type(tracker).__name__ == "CellLineageTracker":
+                tracker.reset()
         observations.extend(current)
         # Heartbeat: lets a person or agent see that a long run is progressing (or has stalled).
         write_json(directory / "progress" / f"{fi:04}.json",

@@ -40,14 +40,21 @@ def _solidity(mask):
 
 
 def _centroids(labels):
-    index = np.arange(1, int(labels.max()) + 1)
-    if not len(index):
+    labels = np.asarray(labels)
+    flat = labels.ravel()
+    nz = np.flatnonzero(flat)
+    if not nz.size:
         return np.zeros((0, 2))
-    present = np.bincount(labels.ravel(), minlength=len(index) + 1)[1:] > 0
-    index = index[present]
-    if not len(index):
+    v = flat[nz]
+    counts = np.bincount(v)[1:]
+    present = counts > 0
+    if not present.any():
         return np.zeros((0, 2))
-    return np.array(ndimage.center_of_mass(labels > 0, labels, index))
+    y, x = np.divmod(nz, labels.shape[1])
+    c = counts[present]
+    cy = np.bincount(v, weights=y)[1:][present] / c
+    cx = np.bincount(v, weights=x)[1:][present] / c
+    return np.column_stack([cy, cx])
 
 
 def field_shift(previous, current, radius=30):
@@ -141,8 +148,16 @@ class ColonyEvents:
         both = (L > 0) & (K > 0)
         owners = {}
         if both.any():
-            for o, c in np.unique(np.stack([L[both], K[both]]), axis=1).T:
-                owners.setdefault(int(o), set()).add(int(c))
+            lb = L[both]
+            kb = K[both]
+            stride = int(kb.max()) + 1
+            if n <= (np.iinfo(np.int64).max - stride) // max(1, stride):
+                for pair in np.unique(lb * stride + kb):
+                    o, c = divmod(int(pair), stride)
+                    owners.setdefault(o, set()).add(c)
+            else:
+                for o, c in np.unique(np.stack([lb, kb]), axis=1).T:
+                    owners.setdefault(int(o), set()).add(int(c))
         piece_of = {}
         original_boxes = ndimage.find_objects(labels)
         for o, ow in list(owners.items()):
@@ -183,7 +198,7 @@ class ColonyEvents:
                     if f and f["stop"] is None:
                         f["stop"] = (frame, "fused")
         newK = lut[L]
-        boxes = ndimage.find_objects(L)
+        boxes = ndimage.find_objects(L) if piece_of else original_boxes
         node_of = {nd["label"]: nd["id"] for nd in nodes}
         carry = []
         for c, f in self.founders.items():

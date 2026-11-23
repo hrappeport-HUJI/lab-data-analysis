@@ -29,19 +29,21 @@ class PrecomputedSegmenter:
         if labels.dtype.kind not in "iu" or (labels.size and labels.min() < 0):
             raise ValueError(f"{path.name}: labels must be nonnegative integers")
         min_area = int(parameters.get("min_area_px", 0))
-        if min_area > 0 and labels.max() > 0:
-            areas = np.bincount(labels.ravel())
-            small = np.flatnonzero(areas < min_area)
-            small = small[small > 0]
-            if small.size:
-                labels = np.where(np.isin(labels, small), 0, labels)
-        # consecutive ids, as the other segmenters produce
-        if labels.max() == 0:
+        if not labels.size:
             return np.zeros(labels.shape, np.int32)
-        ids = np.unique(labels)
-        ids = ids[ids > 0]
-        lut = np.zeros(int(labels.max()) + 1, np.int32)
-        lut[ids] = np.arange(1, ids.size + 1, dtype=np.int32)
+        areas = np.bincount(labels.ravel())
+        if len(areas) <= 1:
+            return np.zeros(labels.shape, np.int32)
+        keep = areas >= max(1, min_area)
+        keep[0] = False
+        n_keep = int(keep.sum())
+        if n_keep == 0:
+            return np.zeros(labels.shape, np.int32)
+        if n_keep == len(areas) - 1:
+            return labels.astype(np.int32)
+        # consecutive ids, as the other segmenters produce
+        lut = np.zeros(len(areas), np.int32)
+        lut[keep] = np.arange(1, n_keep + 1, dtype=np.int32)
         return lut[labels]
 
 

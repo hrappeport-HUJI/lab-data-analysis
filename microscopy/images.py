@@ -8,9 +8,14 @@ from scipy import ndimage
 from .storage import file_digest
 
 
+@lru_cache(maxsize=65536)
+def _verified_digest(path, modified_ns, size):
+    return file_digest(path)
+
+
 @lru_cache(maxsize=12)
 def _read(path, modified_ns, size, expected_digest):
-    if file_digest(path) != expected_digest:
+    if _verified_digest(path, modified_ns, size) != expected_digest:
         raise ValueError("A raw image changed since import. Import a new project.")
     image = tifffile.imread(path)
     if not np.isfinite(image).all():
