@@ -38,6 +38,8 @@ TO_STORE = {
 }
 FROM_STORE = {v: k for k, v in TO_STORE.items()}
 FROM_STORE["not_assessed"] = "unresolved"
+FROM_STORE["pi_positive_death"] = "unresolved"
+FROM_STORE["ghost_lysis"] = "unresolved"
 
 DEFAULT_WINDOW = 256
 OUTPUT_SIZE = 640

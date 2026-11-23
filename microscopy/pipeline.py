@@ -16,6 +16,7 @@ from scipy import ndimage
 from . import __version__
 from .adapters import get_adapter
 from .colony import ColonyEvents
+from .founder_tracker import FounderV2Events
 from .images import read_frame, quality
 from .storage import Project, utc, write_json, file_digest
 from .system import lower_priority
@@ -261,7 +262,11 @@ def _prepare_frame(job, *, state=None):
 
 
 def _follow_field(job):
-    cfg, tracker, directory, n_selected, fi, plan = job
+    if len(job) == 7:
+        cfg, tracker, directory, n_selected, fi, plan, project_root = job
+    else:
+        cfg, tracker, directory, n_selected, fi, plan = job
+        project_root = directory.parent.parent
     field, records = plan["field"], plan["records"]
     tp = cfg.get("tracking", {})
     observations, edges, founders, qc = [], [], [], []
@@ -270,9 +275,16 @@ def _follow_field(job):
         tracker.reset()
     baseline = None
     threshold_used = plan["threshold_used"]
-    colony = ColonyEvents(tp.get("colony")) if tp.get("events") == "colony" else None
+    events_mode = tp.get("events")
+    if events_mode == "colony":
+        colony = ColonyEvents(tp.get("colony"))
+    elif events_mode == "founder_v2":
+        colony = FounderV2Events(tp.get("founder_v2"), project_root=project_root, field=field, cfg=cfg)
+    else:
+        colony = None
     colony_started = False
-    skip_links = colony is not None and bool(tp.get("skip_pairwise_links", False))
+    default_skip = events_mode == "founder_v2"
+    skip_links = colony is not None and bool(tp.get("skip_pairwise_links", default_skip))
 
     for record in records:
         frame = record["frame"]
@@ -478,7 +490,7 @@ def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=Fal
             write_json(directory / "status.json", {"state": "running", "phase": "replay",
                        "pid": os.getpid(), "workers": workers, "updated": utc()})
             phase_start = time.perf_counter()
-            jobs = [(cfg, tracker, directory, len(selected), fi, plan)
+            jobs = [(cfg, tracker, directory, len(selected), fi, plan, str(p.root))
                     for fi, plan in enumerate(plans)]
             results = dict(_bounded_results(field_pool, _follow_field, jobs, min(field_workers, workers)))
             replay_s = time.perf_counter() - phase_start
@@ -552,10 +564,10 @@ def run(project, *, segmenter=None, tracker=None, fields=None, baseline_only=Fal
             "founders": founders,
             "quality": qc,
         }
-        if tp.get("events") == "colony":
+        if tp.get("events") in {"colony", "founder_v2"}:
             result["founder_events"] = founder_events
             result["label_planes"] = label_planes
-            result["graph_scope"] = "founder_colonies"
+            result["graph_scope"] = "founder_v2" if tp.get("events") == "founder_v2" else "founder_colonies"
         if field_thresholds:
             result["field_thresholds"] = field_thresholds
         if resume_from:

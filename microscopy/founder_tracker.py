@@ -137,6 +137,7 @@ class FounderResult:
     used_transient_contact_split: bool = False
     flags: list[str] = field(default_factory=list)
     frame0_scores: dict[str, Any] = field(default_factory=dict)
+    frame_labels: dict[int, list[int]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -657,6 +658,7 @@ class _FounderState:
     result: FounderResult | None = None
     frame0_scores: dict[str, Any] = field(default_factory=dict)
     flags: list[str] = field(default_factory=list)
+    frame_labels: dict[int, list[int]] = field(default_factory=dict)
 
 
 class FieldTracker:
@@ -823,6 +825,7 @@ class FieldTracker:
                 pi_last=pi0_net,
                 frame0_scores=scores,
                 flags=list(scores.get("flags", [])),
+                frame_labels={0: [int(id0)]},
             )
             if pi0_net is not None and pi0_net >= self.cfg.pi_high_baseline_min:
                 st.pi_high_streak = 1
@@ -925,6 +928,7 @@ class FieldTracker:
             used_transient_contact_split=st.used_transient_contact_split,
             flags=sorted(set(st.flags)),
             frame0_scores=dict(st.frame0_scores),
+            frame_labels={int(f): list(ls) for f, ls in st.frame_labels.items()},
         )
         st.result = res
         return res
@@ -1133,6 +1137,11 @@ class FieldTracker:
 
             st.fam_crop = new_fam_crop
             st.by0, st.by1, st.bx0, st.bx1 = new_by0, new_by1, new_bx0, new_bx1
+            tracked_lids = [int(ids[i]) for i in members]
+            if split_applied:
+                tracked_lids.extend(int(ids[i]) for i in merged)
+            if tracked_lids:
+                st.frame_labels[int(frame_idx)] = tracked_lids
 
             st.last_area = m_sum
             st.max_area = max(st.max_area, m_sum)
@@ -1385,3 +1394,161 @@ def track_founder(
         dark_filter_applied=dark_filter_applied,
         cfg=cfg,
     )[founder_id]
+
+
+def _pick_channel(explicit: Any, fluorescence: Sequence[str], keywords: tuple[str, ...]) -> str | None:
+    if explicit is not None:
+        return str(explicit) if explicit else None
+    for ch in fluorescence:
+        low = str(ch).lower()
+        if any(k in low for k in keywords):
+            return str(ch)
+    return None
+
+
+class FounderV2Events:
+    """Pipeline event-backend wrapper adapting :class:`FieldTracker` to ``pipeline.py``.
+
+    Matches the ``start`` / ``update`` / ``skip`` / ``finish`` contract of
+    :class:`microscopy.colony.ColonyEvents` so ``tracking.events = "founder_v2"``
+    works seamlessly with ``pipeline.run()``, ``events.summarize()``,
+    ``analysis.analyze()``, and ``workbench``.
+    """
+
+    def __init__(
+        self,
+        params: Mapping[str, Any] | None = None,
+        *,
+        project_root: str | Any,
+        field: str,
+        cfg: Mapping[str, Any],
+    ):
+        from dataclasses import fields as dc_fields
+
+        p = dict(params or {})
+        valid = {f.name for f in dc_fields(TrackerConfig)}
+        self.tcfg = TrackerConfig(**{k: v for k, v in p.items() if k in valid})
+        self.dark_filter_applied = bool(p.get("dark_filter_applied", False))
+        self.project_root = str(project_root)
+        self.field = field
+        self.structure_channel = cfg["structure_channel"]
+        fluor = list(cfg.get("fluorescence_channels", []))
+        self.pi_channel = _pick_channel(
+            p.get("pi_channel") if "pi_channel" in p else None, fluor, ("mcherry", "pi")
+        )
+        self.yfp_channel = _pick_channel(
+            p.get("yfp_channel") if "yfp_channel" in p else None, fluor, ("yfp",)
+        )
+        self._project = None
+        self.tracker: FieldTracker | None = None
+        self.baseline = 0
+        self.founder_obs: dict[str, str] = {}
+        self.node_index: dict[tuple[int, int], str] = {}
+
+    def _read_optional(self, frame: int, channel: str | None) -> np.ndarray | None:
+        if not channel or self._project is None:
+            return None
+        if (self.field, frame, channel) not in self._project.frames:
+            return None
+        from .images import read_frame
+
+        return read_frame(self._project, self.field, frame, channel)
+
+    def start(self, frame: int, labels: np.ndarray, current_nodes: Sequence[Mapping[str, Any]], founders: Sequence[Mapping[str, Any]]) -> None:
+        from .storage import Project
+
+        self._project = Project(self.project_root)
+        self.baseline = int(frame)
+        node_by_id = {n["id"]: n for n in current_nodes}
+        for n in current_nodes:
+            self.node_index[(0, int(n["label"]))] = n["id"]
+
+        founders_map: dict[str, tuple[float, float]] = {}
+        for f in founders:
+            fid = f["id"]
+            oid = f["observation_id"]
+            self.founder_obs[fid] = oid
+            n = node_by_id[oid]
+            founders_map[fid] = (float(n["y"]), float(n["x"]))
+
+        ph0 = self._read_optional(self.baseline, self.structure_channel)
+        pi0 = self._read_optional(self.baseline, self.pi_channel)
+        yfp0 = self._read_optional(self.baseline, self.yfp_channel)
+        self.tracker = FieldTracker(
+            labels,
+            founders_map,
+            phase0=ph0,
+            pi0=pi0,
+            yfp0=yfp0,
+            dark_filter_applied=self.dark_filter_applied,
+            cfg=self.tcfg,
+        )
+
+    def update(self, frame: int, labels: np.ndarray, current_nodes: Sequence[Mapping[str, Any]]) -> None:
+        if self.tracker is None or not self.tracker.active_ids():
+            return
+        rel = int(frame) - self.baseline
+        if rel <= 0:
+            return
+        for n in current_nodes:
+            self.node_index[(rel, int(n["label"]))] = n["id"]
+        ph = self._read_optional(int(frame), self.structure_channel)
+        pi = self._read_optional(int(frame), self.pi_channel)
+        self.tracker.step(
+            rel,
+            labels,
+            phase_image=ph,
+            pi_image=pi,
+            dark_filter_applied=self.dark_filter_applied,
+        )
+
+    def skip(self, frame: int) -> None:
+        if self.tracker is None:
+            return
+        rel = int(frame) - self.baseline
+        if rel > 0:
+            self.tracker.pause_defocused(rel)
+
+    def finish(self, recording_last_frame: int) -> dict[str, dict[str, Any]]:
+        if self.tracker is None:
+            return {}
+        rel_last = max(0, int(recording_last_frame) - self.baseline)
+        results = self.tracker.finish(recording_last_frame=rel_last)
+        events: dict[str, dict[str, Any]] = {}
+        for fid, res in results.items():
+            obs_ids: list[str] = []
+            seen: set[str] = set()
+            root_oid = self.founder_obs.get(fid)
+            if root_oid:
+                obs_ids.append(root_oid)
+                seen.add(root_oid)
+            for rel_f, lids in sorted(res.frame_labels.items()):
+                for lid in lids:
+                    oid = self.node_index.get((int(rel_f), int(lid)))
+                    if oid and oid not in seen:
+                        obs_ids.append(oid)
+                        seen.add(oid)
+            ev_frame = (int(res.event_frame) + self.baseline) if res.event_frame is not None else None
+            events[fid] = {
+                "decision": res.decision,
+                "event_frame": ev_frame,
+                "lower_frame": int(res.lower_frame) + self.baseline,
+                "upper_frame": int(res.upper_frame) + self.baseline,
+                "last_identity_frame": int(res.last_identity_frame) + self.baseline,
+                "tracking_end_reason": res.tracking_end_reason,
+                "contains_gap": bool(res.contains_gap),
+                "flags": list(res.flags),
+                "observation_ids": obs_ids,
+                "growth_ratio": res.growth_ratio,
+                "elongation_ratio": res.elongation_ratio,
+                "pi_0": res.pi_0,
+                "pi_max": res.pi_max,
+                "pi_surge_max": res.pi_surge_max,
+                "r_0": res.r_0,
+                "r_last": res.r_last,
+                "r_post": res.r_post,
+                "delta_r": res.delta_r,
+                "frame0_scores": dict(res.frame0_scores),
+            }
+        return events
+

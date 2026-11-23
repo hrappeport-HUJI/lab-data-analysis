@@ -402,3 +402,93 @@ def test_fast_omnipose_roi_pack_unpack_and_zlib1(tmp_path):
     with np.load(p_sync) as z1, np.load(p_async) as z2:
         assert np.array_equal(z1["labels"], unpacked)
         assert np.array_equal(z2["labels"], unpacked)
+
+
+def test_pipeline_founder_v2_end_to_end(tmp_path):
+    """End-to-end pipeline.run with tracking.events='founder_v2' + summarize + workbench."""
+    import json
+    import tifffile
+    from microscopy.events import summarize
+    from microscopy.importing import initialize
+    from microscopy.pipeline import run
+    from microscopy.review import materialize
+    from microscopy.workbench.adapter import RunReviewModel
+
+    raw = tmp_path / "raw"
+    pos_dir = raw / "Pos1"
+    pos_dir.mkdir(parents=True)
+    lab_dir = tmp_path / "labels" / "Pos1"
+    lab_dir.mkdir(parents=True)
+
+    shape = (128, 160)
+    for f in range(8):
+        ph = _make_bg(shape, val=2000.0, noise=5.0, seed=200 + f)
+        pi = _make_bg(shape, val=200.0, noise=5.0, seed=300 + f)
+        lbl = np.zeros(shape, dtype=np.uint16)
+
+        # Founder 1 (top-left): grows and divides at f=4
+        if f < 4:
+            x1 = 44 + 4 * f
+            _draw_rod(lbl, ph, 1, 28, 24, x1)
+        else:
+            _draw_rod(lbl, ph, 1, 28, 22, 41)
+            _draw_rod(lbl, ph, 4, 28, 44, 63)
+
+        # Founder 2 (middle): stays single, surges in PI at f=3..7
+        _draw_rod(lbl, ph, 2, 68, 24, 44)
+        if f >= 3:
+            pi[lbl == 2] += 450.0
+
+        # Founder 3 (bottom-right): stays single, healthy, no division
+        _draw_rod(lbl, ph, 3, 102, 95, 118)
+
+        tifffile.imwrite(pos_dir / f"img_{f:09d}_PhaseDAPI_000.tif", ph.astype(np.uint16))
+        tifffile.imwrite(pos_dir / f"img_{f:09d}_mCherryDAPI_000.tif", pi.astype(np.uint16))
+        np.savez_compressed(lab_dir / f"{f:09d}.npz", labels=lbl)
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        json.dumps(
+            {
+                "file_pattern": r"Pos(?P<field>\d+)/img_(?P<frame>\d+)_(?P<channel>[^/]+)_000\.tif",
+                "structure_channel": "PhaseDAPI",
+                "fluorescence_channels": ["mCherryDAPI"],
+                "frame_interval_s": 300.0,
+                "segmentation": {
+                    "adapter": "precomputed",
+                    "labels_dir": str(tmp_path / "labels"),
+                    "min_area_px": 10,
+                },
+                "tracking": {
+                    "adapter": "overlap",
+                    "events": "founder_v2",
+                    "founder_v2": {"persist": 2},
+                },
+                "founders": {"edge_margin_px": 3, "isolation_px": 0},
+            }
+        )
+    )
+    p = initialize(raw, cfg_path, tmp_path / "proj")
+
+    res = run(p, fields=["1"])
+    assert res["graph_scope"] == "founder_v2"
+    assert len(res["founder_events"]) == 3
+
+    data = materialize(p, res["run_id"], [])
+    rows = summarize(p, data)
+    by_dec = {r["decision"]: r for r in rows}
+    assert set(by_dec.keys()) == {"division", "pi_positive_death", "no_division"}
+    assert by_dec["division"]["upper_frame"] == 4
+    assert by_dec["pi_positive_death"]["upper_frame"] == 3
+    assert len(by_dec["no_division"]["observation_ids"]) == 8
+
+    # Workbench adapter must load founder_v2 runs (including death fates) without error
+    wb = RunReviewModel(p.root, res["run_id"], read_only=True)
+    st = wb.state()
+    assert len(st["records"]) == 3
+    assert {r["tracking_end_reason"] for r in st["records"]} == {
+        "division",
+        "pi_positive_death",
+        "recording_end",
+    }
+
