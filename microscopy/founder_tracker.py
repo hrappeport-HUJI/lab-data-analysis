@@ -88,7 +88,12 @@ class TrackerConfig:
     # Anti-shove phase-ghost lysis calling
     ghost_delta_r: float = 0.25
     ghost_r_post_min: float = -0.08
-    ghost_clear_radius_px: int = 10
+    ghost_clear_radius_px: int = 14
+    ghost_persist: int = 2
+    ghost_dark_ratio: float = 0.78
+    ghost_max_dark_px: int = 12
+    ghost_bright_ratio: float = 1.15
+    ghost_max_bright_px: int = 12
     ring_inner_px: int = 3
     ring_outer_px: int = 10
     min_ring_pixels: int = 20
@@ -636,6 +641,7 @@ class _FounderState:
     r_last: float | None = None
     r_post: float | None = None
     delta_r: float | None = None
+    ghost_streak: int = 0
     pi_0: float | None = None
     pi_running_min: float | None = None
     pi_max: float | None = None
@@ -1069,11 +1075,17 @@ class FieldTracker:
             # Track recovered cleanly on frame_idx
             st.missing = 0
             st.first_missing = None
+            st.ghost_streak = 0
             m_clean = np.isin(inv, members) if members else np.zeros_like(fm)
             m = (m_clean | split_mask) if split_mask is not None else m_clean
             mys, mxs = np.nonzero(m)
 
             expanded_to_full = False
+            new_fam_crop: np.ndarray
+            new_by0: int
+            new_by1: int
+            new_bx0: int
+            new_bx1: int
             if (
                 (int(mys.min()) == 0 and y0 > 0)
                 or (int(mxs.min()) == 0 and x0 > 0)
@@ -1089,12 +1101,11 @@ class FieldTracker:
                     ):
                         newly_finished[fid] = self._finalize(st, "lost", frame_idx, st.last_seen, frame_idx, "edge")
                         continue
-                    by0, by1 = int(fys.min()), int(fys.max()) + 1
-                    bx0, bx1 = int(fxs.min()), int(fxs.max()) + 1
-                    st.fam_crop = full_m[by0:by1, bx0:bx1]
-                    st.by0, st.by1, st.bx0, st.bx1 = by0, by1, bx0, bx1
-                    m_sum = int(st.fam_crop.sum())
-                    sub_lab = labs_f[by0:by1, bx0:bx1]
+                    new_by0, new_by1 = int(fys.min()), int(fys.max()) + 1
+                    new_bx0, new_bx1 = int(fxs.min()), int(fxs.max()) + 1
+                    new_fam_crop = full_m[new_by0:new_by1, new_bx0:new_bx1]
+                    m_sum = int(new_fam_crop.sum())
+                    sub_lab = labs_f[new_by0:new_by1, new_bx0:new_bx1]
                     big_count = sum(1 for lid in member_lids if int((sub_lab == lid).sum()) >= cfg.frac * m_sum)
                     expanded_to_full = True
 
@@ -1107,11 +1118,10 @@ class FieldTracker:
                 ):
                     newly_finished[fid] = self._finalize(st, "lost", frame_idx, st.last_seen, frame_idx, "edge")
                     continue
-                by0, by1 = int(mys.min()) + y0, int(mys.max()) + y0 + 1
-                bx0, bx1 = int(mxs.min()) + x0, int(mxs.max()) + x0 + 1
-                st.fam_crop = m[by0 - y0 : by1 - y0, bx0 - x0 : bx1 - x0]
-                st.by0, st.by1, st.bx0, st.bx1 = by0, by1, bx0, bx1
-                m_sum = int(st.fam_crop.sum())
+                new_by0, new_by1 = int(mys.min()) + y0, int(mys.max()) + y0 + 1
+                new_bx0, new_bx1 = int(mxs.min()) + x0, int(mxs.max()) + x0 + 1
+                new_fam_crop = m[new_by0 - y0 : new_by1 - y0, new_bx0 - x0 : new_bx1 - x0]
+                m_sum = int(new_fam_crop.sum())
                 if split_applied and not members:
                     # Single merged blob split by EDT alone must not fabricate a 2-daughter split
                     big_count = 1
@@ -1120,6 +1130,9 @@ class FieldTracker:
                     if split_mask is not None:
                         big_areas.append(int(split_mask.sum()))
                     big_count = sum(1 for a_px in big_areas if a_px >= cfg.frac * m_sum)
+
+            st.fam_crop = new_fam_crop
+            st.by0, st.by1, st.bx0, st.bx1 = new_by0, new_by1, new_bx0, new_bx1
 
             st.last_area = m_sum
             st.max_area = max(st.max_area, m_sum)
@@ -1242,25 +1255,46 @@ class FieldTracker:
         st.missing += 1
         if st.missing == 1:
             st.first_missing = frame_idx
-            # Anti-shove ghost lysis test on the FIRST missing frame
-            if phase_image is not None and fm_roi.any() and st.r_last is not None:
-                bg_phase_val = bg_p if (bg_p is not None and bg_p > 0.0) else fast_bg_median(phase_image)
-                r_post = (float(np.median(phase_image[y0:y1, x0:x1][fm_roi])) - bg_phase_val) / max(bg_phase_val, 1e-6)
-                delta_r = r_post - st.r_last
+        # Anti-shove ghost lysis test: requires persistent phase-neutral/bright empty footprint
+        # with neither segmented cells nor raw phase-dark cell pixels nearby (blocks shifted cells
+        # and unsegmented invading colonies).
+        if phase_image is not None and fm_roi.any() and st.r_last is not None:
+            bg_phase_val = bg_p if (bg_p is not None and bg_p > 0.0) else fast_bg_median(phase_image)
+            phase_roi = phase_image[y0:y1, x0:x1]
+            r_post = (float(np.median(phase_roi[fm_roi])) - bg_phase_val) / max(bg_phase_val, 1e-6)
+            delta_r = r_post - st.r_last
+            if st.missing == 1:
                 st.r_post = r_post
                 st.delta_r = delta_r
-                if delta_r >= cfg.ghost_delta_r and r_post >= cfg.ghost_r_post_min:
-                    dil_clear = ndi.binary_dilation(fm_roi, iterations=cfg.ghost_clear_radius_px)
-                    occupied_or_near = bool((labs_f[y0:y1, x0:x1][dil_clear] > 0).any())
-                    if not occupied_or_near:
+            if delta_r >= cfg.ghost_delta_r and r_post >= cfg.ghost_r_post_min:
+                dil_clear = ndi.binary_dilation(fm_roi, iterations=cfg.ghost_clear_radius_px)
+                occupied_labels = bool((labs_f[y0:y1, x0:x1][dil_clear] > 0).any())
+                raw_dark_px = int((phase_roi[dil_clear] < cfg.ghost_dark_ratio * bg_phase_val).sum())
+                raw_bright_px = int((phase_roi[dil_clear] > cfg.ghost_bright_ratio * bg_phase_val).sum())
+                if (
+                    not occupied_labels
+                    and raw_dark_px <= cfg.ghost_max_dark_px
+                    and raw_bright_px <= cfg.ghost_max_bright_px
+                ):
+                    st.ghost_streak += 1
+                    st.r_post = r_post
+                    st.delta_r = delta_r
+                    if st.ghost_streak >= cfg.ghost_persist:
+                        ev_f = st.first_missing if st.first_missing is not None else frame_idx
                         return self._finalize(
                             st,
                             "ghost_lysis",
-                            frame_idx,
+                            ev_f,
                             st.last_seen,
-                            frame_idx,
+                            ev_f,
                             "ghost_lysis",
                         )
+                else:
+                    st.ghost_streak = 0
+            else:
+                st.ghost_streak = 0
+        else:
+            st.ghost_streak = 0
         if st.missing > 0:
             st.contains_gap = True
         if st.missing > cfg.max_gap:

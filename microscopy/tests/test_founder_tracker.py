@@ -273,6 +273,47 @@ def test_ghost_lysis_anti_shove_distinction():
     assert res_shove.decision != "ghost_lysis"
     assert res_shove.decision == "lost"
 
+    # Case C: Unsegmented cell shifts ~9 px (no label in labs_f, but raw phase-dark pixels sit inside halo)
+    labs_c, phs_c = [], []
+    for f in range(12):
+        ph = _make_bg(shape, val=2000.0, noise=5.0, seed=105 + f)
+        lbl = np.zeros(shape, dtype=np.int32)
+        if f < 4:
+            _draw_rod(lbl, ph, 1, 60, 40, 60)
+        else:
+            # Footprint is neutral background, but intact unsegmented dark rod sits 9 px above
+            ph[56:65, 40:61] = 2000.0
+            ph[47:54, 40:61] = 1050.0
+        labs_c.append(lbl)
+        phs_c.append(ph)
+
+    res_shift = track_founder(labs_c, 60.0, 50.0, phase_seq=phs_c)
+    assert res_shift.decision != "ghost_lysis"
+    assert res_shift.decision == "lost"
+
+
+def test_ghost_lysis_blocked_by_bright_colony_halo():
+    """Bright phase-contrast halo from an encroaching colony vetoes ghost_lysis."""
+    shape = (128, 160)
+    labs, phs = [], []
+    for f in range(8):
+        ph = _make_bg(shape, val=2000.0, noise=5.0, seed=140 + f)
+        lbl = np.zeros(shape, dtype=np.int32)
+        # Anchor rods so phase_cross_correlation measures zero stage drift
+        _draw_rod(lbl, ph, 10, 20, 20, 50)
+        _draw_rod(lbl, ph, 11, 105, 100, 135)
+        if f < 4:
+            _draw_rod(lbl, ph, 1, 60, 40, 60)
+        else:
+            # No segmented cell or dark core, but bright colony phase halo (>1.15x bg)
+            ph[55:65, 39:62] = 2450.0
+        labs.append(lbl)
+        phs.append(ph)
+
+    res = track_founder(labs, 60.0, 50.0, phase_seq=phs)
+    assert res.decision != "ghost_lysis"
+    assert res.decision == "lost"
+
 
 def test_frame0_doublet_debris_and_yfp_scoring():
     shape = (128, 160)
