@@ -62,6 +62,24 @@ class TrackerConfig:
     pad: int = 48
     max_lost_dist_px: int = 6
 
+    # Early colony-encroachment ('engulfed') detection
+    enable_engulfment_check: bool = True
+    encroach_min_frame: int = 3
+    encroach_near_pad: int = 10
+    encroach_touch_px: int = 2
+    encroach_min_neighbors: int = 2
+    encroach_touch_min: float = 0.26
+    encroach_touch_delta: float = 0.20
+    encroach_near_min: float = 0.26
+    encroach_near_delta: float = 0.18
+    encroach_persist: int = 2
+    encroach_growth_exempt: float = 1.5
+    encroach_strong_neighbors: int = 3
+    encroach_strong_touch: float = 0.32
+    encroach_strong_near: float = 0.32
+    encroach_strong_persist: int = 2
+    encroach_jump_ratio: float = 1.6
+
     # Phase-darkness ripple filter (cell_median / bg_median <= 0.85 <=> r <= -0.15)
     dark_ratio_max: float = 0.85
 
@@ -75,17 +93,22 @@ class TrackerConfig:
     focus_drop_ratio: float = 0.60
     focus_baseline_frames: int = 3
 
-    # In-track PI-positive death calling
+    # Observational PI trajectory & epistemic annotation (non-circular by default:
+    # PI does NOT terminate tracking unless terminate_on_pi=True)
+    terminate_on_pi: bool = False
     pi_abs_min: float = 100.0
     pi_noise_mult: float = 6.0
-    pi_surge_min: float = 100.0
+    pi_surge_min: float = 300.0
     pi_streak: int = 2
     pi_high_baseline_min: float = 1000.0
     pi_high_baseline_streak: int = 5
     pi_high_baseline_decay: float = 0.85
     pi_high_baseline_growth: float = 1.2
+    pi_probably_dead_max_min: float = 1000.0
+    pi_probably_dead_last_min: float = 800.0
+    pi_intermediate_min: float = 150.0
 
-    # Anti-shove phase-ghost lysis calling
+    # Anti-shove, field-normalized phase-ghost lysis calling
     ghost_delta_r: float = 0.25
     ghost_r_post_min: float = -0.08
     ghost_clear_radius_px: int = 14
@@ -94,6 +117,9 @@ class TrackerConfig:
     ghost_max_dark_px: int = 12
     ghost_bright_ratio: float = 1.15
     ghost_max_bright_px: int = 12
+    ghost_min_focus_ratio: float = 0.78
+    ghost_max_burst_count: int = 3
+    ghost_max_burst_frac: float = 0.25
     ring_inner_px: int = 3
     ring_outer_px: int = 10
     min_ring_pixels: int = 20
@@ -128,6 +154,9 @@ class FounderResult:
     pi_max: float | None = None
     pi_last: float | None = None
     pi_surge_max: float | None = None
+    pi_surge_frame: int | None = None
+    pi_high_frame: int | None = None
+    pi_status: str = "no_pi"
     r_0: float | None = None
     r_last: float | None = None
     r_post: float | None = None
@@ -158,6 +187,9 @@ class FounderResult:
             "pi_max": self.pi_max,
             "pi_last": self.pi_last,
             "pi_surge_max": self.pi_surge_max,
+            "pi_surge_frame": self.pi_surge_frame,
+            "pi_high_frame": self.pi_high_frame,
+            "pi_status": self.pi_status,
             "r_0": self.r_0,
             "r_last": self.r_last,
             "r_post": self.r_post,
@@ -602,6 +634,41 @@ def score_frame0_founder(
     }
 
 
+def _neighborhood_crowding(
+    labels: np.ndarray,
+    by0: int,
+    by1: int,
+    bx0: int,
+    bx1: int,
+    fam_crop: np.ndarray,
+    near_pad: int = 10,
+    touch_px: int = 2,
+) -> tuple[float, float, int]:
+    """Return ``(touch_frac, near_frac, n_other_labels)`` around a founder mask."""
+    h, w = labels.shape
+    ry0, ry1 = max(0, by0 - near_pad), min(h, by1 + near_pad)
+    rx0, rx1 = max(0, bx0 - near_pad), min(w, bx1 + near_pad)
+    sub_l = labels[ry0:ry1, rx0:rx1]
+    sub_m = np.zeros_like(sub_l, dtype=bool)
+    sub_m[by0 - ry0 : by1 - ry0, bx0 - rx0 : bx1 - rx0] = fam_crop
+    other = (sub_l > 0) & (~sub_m)
+    other_px = int(other.sum())
+    if other_px == 0:
+        return 0.0, 0.0, 0
+    non_self = int(sub_l.size - int(fam_crop.sum()))
+    near_frac = float(other_px) / max(non_self, 1)
+    n_other = int(np.unique(sub_l[other]).size)
+
+    py0, py1 = max(0, by0 - touch_px), min(h, by1 + touch_px)
+    px0, px1 = max(0, bx0 - touch_px), min(w, bx1 + touch_px)
+    sl2 = labels[py0:py1, px0:px1]
+    sm2 = np.zeros_like(sl2, dtype=bool)
+    sm2[by0 - py0 : by1 - py0, bx0 - px0 : bx1 - px0] = fam_crop
+    dil2 = ndi.binary_dilation(sm2, iterations=touch_px) & (~sm2)
+    touch_frac = float((dil2 & (sl2 > 0) & (~sm2)).sum()) / max(int(dil2.sum()), 1)
+    return touch_frac, near_frac, n_other
+
+
 def _first_division(counts: list[tuple[int, int]], persist: int) -> int | None:
     if len(counts) < persist:
         return None
@@ -637,6 +704,15 @@ class _FounderState:
     contains_gap: bool = False
     contains_defocus_pause: bool = False
     started_at_edge: bool = False
+    # Early colony-encroachment state
+    base_touch_frac: float = 0.0
+    base_near_frac: float = 0.0
+    encroach_streak: int = 0
+    encroach_first_frame: int | None = None
+    encroach_prev_frame: int | None = None
+    strong_encroach_streak: int = 0
+    strong_encroach_first_frame: int | None = None
+    strong_encroach_prev_frame: int | None = None
     # Channel history
     r_0: float | None = None
     r_last: float | None = None
@@ -651,9 +727,11 @@ class _FounderState:
     pi_surge_streak: int = 0
     pi_surge_first_frame: int | None = None
     pi_surge_prev_frame: int | None = None
+    pi_surge_confirmed_frame: int | None = None
     pi_high_streak: int = 0
     pi_high_first_frame: int | None = None
     pi_high_prev_frame: int | None = None
+    pi_high_confirmed_frame: int | None = None
     # Terminal call
     result: FounderResult | None = None
     frame0_scores: dict[str, Any] = field(default_factory=dict)
@@ -697,6 +775,7 @@ class FieldTracker:
         self.prev_phase_bin = _central_binned(phase0, self.cfg.drift_bin)[0] if phase0 is not None else None
         self.focus_history: list[float] = []
         self.baseline_focus: float | None = None
+        self.last_focus_ratio: float = 1.0
         if phase0 is not None:
             f0_score = compute_focus_score(phase0)
             self.focus_history.append(f0_score)
@@ -762,6 +841,16 @@ class FieldTracker:
             fam_crop = l0[by0:by1, bx0:bx1] == id0
             area0 = int(fam_crop.sum())
             length0 = _major_axis_length(fam_crop)
+            base_touch, base_near, _ = _neighborhood_crowding(
+                l0,
+                by0,
+                by1,
+                bx0,
+                bx1,
+                fam_crop,
+                near_pad=self.cfg.encroach_near_pad,
+                touch_px=self.cfg.encroach_touch_px,
+            )
 
             scores = (
                 score_frame0_founder(
@@ -817,6 +906,8 @@ class FieldTracker:
                 last_length=max(length0, 1.0),
                 counts=[(0, 1)],
                 started_at_edge=(by0 == 0 or bx0 == 0 or by1 == self.H or bx1 == self.W),
+                base_touch_frac=base_touch,
+                base_near_frac=base_near,
                 r_0=r0,
                 r_last=r0,
                 pi_0=pi0_net,
@@ -879,9 +970,11 @@ class FieldTracker:
                     dy, dx = cand_dy, cand_dx
 
         is_focused = True
+        self.last_focus_ratio = 1.0
         if phase_image is not None:
             score = compute_focus_score(phase_image)
             if self.baseline_focus is not None and self.baseline_focus > 0.0:
+                self.last_focus_ratio = float(score / self.baseline_focus)
                 if score < self.cfg.focus_drop_ratio * self.baseline_focus:
                     is_focused = False
             if is_focused:
@@ -901,6 +994,30 @@ class FieldTracker:
         reason: str,
     ) -> FounderResult:
         st.active = False
+        cfg = self.cfg
+        if decision == "division":
+            pi_status = "divided"
+        elif st.pi_0 is None and st.pi_max is None and st.pi_last is None:
+            pi_status = "no_pi"
+        elif (
+            (st.pi_max is not None and st.pi_max >= cfg.pi_probably_dead_max_min)
+            or (st.pi_last is not None and st.pi_last >= cfg.pi_probably_dead_last_min)
+            or st.pi_surge_confirmed_frame is not None
+            or st.pi_high_confirmed_frame is not None
+        ):
+            pi_status = "probably_dead"
+        elif (
+            (st.pi_max is not None and st.pi_max >= cfg.pi_intermediate_min)
+            or (st.pi_last is not None and st.pi_last >= cfg.pi_intermediate_min)
+        ):
+            pi_status = "intermediate_pi"
+        else:
+            pi_status = "low_pi"
+
+        flags = set(st.flags)
+        if pi_status == "probably_dead":
+            flags.add("pi_probably_dead")
+
         res = FounderResult(
             founder_id=st.founder_id,
             decision=decision,
@@ -919,6 +1036,9 @@ class FieldTracker:
             pi_max=round(st.pi_max, 2) if st.pi_max is not None else None,
             pi_last=round(st.pi_last, 2) if st.pi_last is not None else None,
             pi_surge_max=round(st.pi_surge_max, 2) if st.pi_0 is not None else None,
+            pi_surge_frame=st.pi_surge_confirmed_frame,
+            pi_high_frame=st.pi_high_confirmed_frame,
+            pi_status=pi_status,
             r_0=round(st.r_0, 4) if st.r_0 is not None else None,
             r_last=round(st.r_last, 4) if st.r_last is not None else None,
             r_post=round(st.r_post, 4) if st.r_post is not None else None,
@@ -926,7 +1046,7 @@ class FieldTracker:
             contains_gap=st.contains_gap,
             contains_defocus_pause=st.contains_defocus_pause,
             used_transient_contact_split=st.used_transient_contact_split,
-            flags=sorted(set(st.flags)),
+            flags=sorted(flags),
             frame0_scores=dict(st.frame0_scores),
             frame_labels={int(f): list(ls) for f, ls in st.frame_labels.items()},
         )
@@ -978,6 +1098,8 @@ class FieldTracker:
             labs_f = labels
 
         newly_finished: dict[str, FounderResult] = {}
+        n_active_start = sum(1 for st in self.states.values() if st.active)
+        ghost_candidates: list[tuple[str, _FounderState, int]] = []
 
         for fid, st in self.states.items():
             if not st.active:
@@ -1003,7 +1125,9 @@ class FieldTracker:
                 fm[sby0 + cy0 - y0 : sby0 + cy1 - y0, sbx0 + cx0 - x0 : sbx0 + cx1 - x0] = st.fam_crop[cy0:cy1, cx0:cx1]
 
             if not fm.any():
-                res = self._handle_missing(st, frame_idx, fm, y0, y1, x0, x1, labs_f, phase_image, bg_p)
+                res = self._handle_missing(
+                    st, frame_idx, fm, y0, y1, x0, x1, labs_f, phase_image, bg_p, ghost_candidates=ghost_candidates
+                )
                 if res is not None:
                     newly_finished[fid] = res
                 continue
@@ -1071,7 +1195,9 @@ class FieldTracker:
                 st.contact_streak = 0
 
             if not members and split_mask is None:
-                res = self._handle_missing(st, frame_idx, fm, y0, y1, x0, x1, labs_f, phase_image, bg_p)
+                res = self._handle_missing(
+                    st, frame_idx, fm, y0, y1, x0, x1, labs_f, phase_image, bg_p, ghost_candidates=ghost_candidates
+                )
                 if res is not None:
                     newly_finished[fid] = res
                 continue
@@ -1134,6 +1260,81 @@ class FieldTracker:
                     if split_mask is not None:
                         big_areas.append(int(split_mask.sum()))
                     big_count = sum(1 for a_px in big_areas if a_px >= cfg.frac * m_sum)
+
+            # Early colony-encroachment ('engulfed') check before committing this frame's mask
+            prev_area = st.last_area
+            if cfg.enable_engulfment_check and frame_idx >= cfg.encroach_min_frame:
+                touch_f, near_f, n_oth = _neighborhood_crowding(
+                    labs_f,
+                    new_by0,
+                    new_by1,
+                    new_bx0,
+                    new_bx1,
+                    new_fam_crop,
+                    near_pad=cfg.encroach_near_pad,
+                    touch_px=cfg.encroach_touch_px,
+                )
+                is_crowded = (n_oth >= cfg.encroach_min_neighbors) and (
+                    (touch_f >= max(cfg.encroach_touch_min, st.base_touch_frac + cfg.encroach_touch_delta))
+                    or (near_f >= max(cfg.encroach_near_min, st.base_near_frac + cfg.encroach_near_delta))
+                )
+                is_strong = (
+                    (n_oth >= cfg.encroach_strong_neighbors)
+                    and (touch_f >= max(cfg.encroach_strong_touch, st.base_touch_frac + cfg.encroach_touch_delta))
+                    and (near_f >= max(cfg.encroach_strong_near, st.base_near_frac + cfg.encroach_near_delta))
+                )
+                if (
+                    is_crowded
+                    and prev_area < cfg.encroach_growth_exempt * max(st.area0, 1)
+                    and m_sum >= cfg.encroach_jump_ratio * max(prev_area, 1)
+                ):
+                    newly_finished[fid] = self._finalize(
+                        st, "lost", frame_idx, st.last_seen, frame_idx, "engulfed"
+                    )
+                    continue
+                if is_crowded:
+                    if st.encroach_streak == 0:
+                        st.encroach_first_frame = frame_idx
+                        st.encroach_prev_frame = st.last_seen
+                    st.encroach_streak += 1
+                else:
+                    st.encroach_streak = 0
+                    st.encroach_first_frame = None
+                    st.encroach_prev_frame = None
+                if is_strong:
+                    if st.strong_encroach_streak == 0:
+                        st.strong_encroach_first_frame = frame_idx
+                        st.strong_encroach_prev_frame = st.last_seen
+                    st.strong_encroach_streak += 1
+                else:
+                    st.strong_encroach_streak = 0
+                    st.strong_encroach_first_frame = None
+                    st.strong_encroach_prev_frame = None
+
+                if (
+                    prev_area < cfg.encroach_growth_exempt * max(st.area0, 1)
+                    and st.encroach_streak >= cfg.encroach_persist
+                ):
+                    ev_f = int(st.encroach_first_frame if st.encroach_first_frame is not None else frame_idx)
+                    lo_f = int(st.encroach_prev_frame if st.encroach_prev_frame is not None else st.last_seen)
+                    st.last_seen = lo_f
+                    for fr_k in [fr for fr in st.frame_labels if fr >= ev_f]:
+                        del st.frame_labels[fr_k]
+                    newly_finished[fid] = self._finalize(st, "lost", ev_f, lo_f, ev_f, "engulfed")
+                    continue
+
+                if st.strong_encroach_streak >= cfg.encroach_strong_persist:
+                    ev_f = int(
+                        st.strong_encroach_first_frame if st.strong_encroach_first_frame is not None else frame_idx
+                    )
+                    lo_f = int(
+                        st.strong_encroach_prev_frame if st.strong_encroach_prev_frame is not None else st.last_seen
+                    )
+                    st.last_seen = lo_f
+                    for fr_k in [fr for fr in st.frame_labels if fr >= ev_f]:
+                        del st.frame_labels[fr_k]
+                    newly_finished[fid] = self._finalize(st, "lost", ev_f, lo_f, ev_f, "engulfed")
+                    continue
 
             st.fam_crop = new_fam_crop
             st.by0, st.by1, st.bx0, st.bx1 = new_by0, new_by1, new_bx0, new_bx1
@@ -1203,23 +1404,29 @@ class FieldTracker:
                         st.pi_high_first_frame = None
                         st.pi_high_prev_frame = None
 
-                    if st.pi_surge_streak >= cfg.pi_streak and m_sum < cfg.growth * st.area0:
+                    if st.pi_surge_streak >= cfg.pi_streak:
                         ev_f = int(st.pi_surge_first_frame if st.pi_surge_first_frame is not None else frame_idx)
-                        lo_f = int(st.pi_surge_prev_frame if st.pi_surge_prev_frame is not None else st.last_seen)
-                        st.last_seen = frame_idx
-                        newly_finished[fid] = self._finalize(
-                            st, "pi_positive_death", ev_f, lo_f, ev_f, "pi_positive_death"
-                        )
-                        continue
+                        if st.pi_surge_confirmed_frame is None:
+                            st.pi_surge_confirmed_frame = ev_f
+                        if cfg.terminate_on_pi and m_sum < cfg.growth * st.area0:
+                            lo_f = int(st.pi_surge_prev_frame if st.pi_surge_prev_frame is not None else st.last_seen)
+                            st.last_seen = frame_idx
+                            newly_finished[fid] = self._finalize(
+                                st, "pi_positive_death", ev_f, lo_f, ev_f, "pi_positive_death"
+                            )
+                            continue
 
                     if st.pi_high_streak >= cfg.pi_high_baseline_streak:
                         ev_f = int(st.pi_high_first_frame if st.pi_high_first_frame is not None else frame_idx)
-                        lo_f = int(st.pi_high_prev_frame if st.pi_high_prev_frame is not None else st.last_seen)
-                        st.last_seen = frame_idx
-                        newly_finished[fid] = self._finalize(
-                            st, "pi_positive_death", ev_f, lo_f, ev_f, "pi_positive_death"
-                        )
-                        continue
+                        if st.pi_high_confirmed_frame is None:
+                            st.pi_high_confirmed_frame = ev_f
+                        if cfg.terminate_on_pi:
+                            lo_f = int(st.pi_high_prev_frame if st.pi_high_prev_frame is not None else st.last_seen)
+                            st.last_seen = frame_idx
+                            newly_finished[fid] = self._finalize(
+                                st, "pi_positive_death", ev_f, lo_f, ev_f, "pi_positive_death"
+                            )
+                            continue
 
             n_daughters = big_count if m_sum >= cfg.growth * st.area0 else 1
             st.counts.append((frame_idx, n_daughters))
@@ -1235,13 +1442,34 @@ class FieldTracker:
                 )
                 continue
 
-            # If a single non-growing cell surges in PI even slightly after reaching >= growth (edge case: already caught if < growth)
-            if st.pi_surge_streak >= cfg.pi_streak:
+            # Optional legacy opt-in: if a single non-dividing cell surges in PI even after >= growth
+            if cfg.terminate_on_pi and st.pi_surge_streak >= cfg.pi_streak:
                 ev_f = int(st.pi_surge_first_frame if st.pi_surge_first_frame is not None else frame_idx)
                 lo_f = int(st.pi_surge_prev_frame if st.pi_surge_prev_frame is not None else st.last_seen)
                 newly_finished[fid] = self._finalize(
                     st, "pi_positive_death", ev_f, lo_f, ev_f, "pi_positive_death"
                 )
+
+        # Field-normalized ghost_lysis burst veto: a synchronized field-wide disappearance
+        # (stage jump, partial defocus, illumination glitch) must not fabricate ghost_lysis calls.
+        if ghost_candidates:
+            burst_limit = max(
+                cfg.ghost_max_burst_count,
+                int(np.ceil(cfg.ghost_max_burst_frac * n_active_start)),
+            )
+            if n_active_start >= 4 and len(ghost_candidates) >= burst_limit:
+                for fid, st, _ev_f in ghost_candidates:
+                    st.ghost_streak = 0
+                    if st.missing > cfg.max_gap:
+                        miss_start = st.first_missing if st.first_missing is not None else frame_idx
+                        newly_finished[fid] = self._finalize(
+                            st, "lost", miss_start, st.last_seen, miss_start, "missing"
+                        )
+            else:
+                for fid, st, ev_f in ghost_candidates:
+                    newly_finished[fid] = self._finalize(
+                        st, "ghost_lysis", ev_f, st.last_seen, ev_f, "ghost_lysis"
+                    )
 
         self.prev_usable_labels = labs_f
         self.last_usable_frame = frame_idx
@@ -1259,15 +1487,21 @@ class FieldTracker:
         labs_f: np.ndarray,
         phase_image: np.ndarray | None,
         bg_p: float | None,
+        ghost_candidates: list[tuple[str, _FounderState, int]] | None = None,
     ) -> FounderResult | None:
         cfg = self.cfg
         st.missing += 1
         if st.missing == 1:
             st.first_missing = frame_idx
-        # Anti-shove ghost lysis test: requires persistent phase-neutral/bright empty footprint
-        # with neither segmented cells nor raw phase-dark cell pixels nearby (blocks shifted cells
-        # and unsegmented invading colonies).
-        if phase_image is not None and fm_roi.any() and st.r_last is not None:
+        # Anti-shove, focus-gated ghost lysis test: requires persistent phase-neutral/bright
+        # empty footprint on a well-focused frame with neither segmented cells nor raw
+        # phase-dark/bright-halo pixels nearby.
+        if (
+            phase_image is not None
+            and fm_roi.any()
+            and st.r_last is not None
+            and self.last_focus_ratio >= cfg.ghost_min_focus_ratio
+        ):
             bg_phase_val = bg_p if (bg_p is not None and bg_p > 0.0) else fast_bg_median(phase_image)
             phase_roi = phase_image[y0:y1, x0:x1]
             r_post = (float(np.median(phase_roi[fm_roi])) - bg_phase_val) / max(bg_phase_val, 1e-6)
@@ -1289,7 +1523,11 @@ class FieldTracker:
                     st.r_post = r_post
                     st.delta_r = delta_r
                     if st.ghost_streak >= cfg.ghost_persist:
+                        st.contains_gap = True
                         ev_f = st.first_missing if st.first_missing is not None else frame_idx
+                        if ghost_candidates is not None:
+                            ghost_candidates.append((st.founder_id, st, ev_f))
+                            return None
                         return self._finalize(
                             st,
                             "ghost_lysis",
@@ -1529,6 +1767,8 @@ class FounderV2Events:
                         obs_ids.append(oid)
                         seen.add(oid)
             ev_frame = (int(res.event_frame) + self.baseline) if res.event_frame is not None else None
+            pi_surge_f = (int(res.pi_surge_frame) + self.baseline) if res.pi_surge_frame is not None else None
+            pi_high_f = (int(res.pi_high_frame) + self.baseline) if res.pi_high_frame is not None else None
             events[fid] = {
                 "decision": res.decision,
                 "event_frame": ev_frame,
@@ -1543,7 +1783,11 @@ class FounderV2Events:
                 "elongation_ratio": res.elongation_ratio,
                 "pi_0": res.pi_0,
                 "pi_max": res.pi_max,
+                "pi_last": res.pi_last,
                 "pi_surge_max": res.pi_surge_max,
+                "pi_surge_frame": pi_surge_f,
+                "pi_high_frame": pi_high_f,
+                "pi_status": res.pi_status,
                 "r_0": res.r_0,
                 "r_last": res.r_last,
                 "r_post": res.r_post,

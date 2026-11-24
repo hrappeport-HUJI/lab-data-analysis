@@ -204,9 +204,21 @@ def test_pi_positive_death_in_track_vs_healthy_high_baseline_decay():
         phs1.append(ph)
         pis1.append(pi)
 
-    res_dead = track_founder(labs1, 60.0, 50.0, phase_seq=phs1, pi_seq=pis1)
+    # Default non-circular mode: continues tracking to end, annotates observational PI status
+    res_obs = track_founder(labs1, 60.0, 50.0, phase_seq=phs1, pi_seq=pis1)
+    assert res_obs.decision == "no_division"
+    assert res_obs.last_identity_frame == 9
+    assert res_obs.pi_status == "probably_dead"
+    assert res_obs.pi_surge_frame == 4
+    assert "pi_probably_dead" in res_obs.flags
+
+    # Opt-in legacy PI termination mode still terminates at f=4
+    res_dead = track_founder(
+        labs1, 60.0, 50.0, phase_seq=phs1, pi_seq=pis1, cfg=TrackerConfig(terminate_on_pi=True)
+    )
     assert res_dead.decision == "pi_positive_death"
     assert res_dead.event_frame == 4
+    assert res_dead.pi_status == "probably_dead"
 
     # 2. Healthy founder starts with elevated +650 ADU PI that decays as it grows and divides
     labs2, phs2, pis2 = [], [], []
@@ -229,6 +241,8 @@ def test_pi_positive_death_in_track_vs_healthy_high_baseline_decay():
     res_healthy = track_founder(labs2, 60.0, 50.0, phase_seq=phs2, pi_seq=pis2)
     assert res_healthy.decision == "division"
     assert res_healthy.event_frame == 4
+    assert res_healthy.pi_status == "divided"
+    assert "pi_probably_dead" not in res_healthy.flags
 
 
 def test_ghost_lysis_anti_shove_distinction():
@@ -476,19 +490,139 @@ def test_pipeline_founder_v2_end_to_end(tmp_path):
 
     data = materialize(p, res["run_id"], [])
     rows = summarize(p, data)
-    by_dec = {r["decision"]: r for r in rows}
-    assert set(by_dec.keys()) == {"division", "pi_positive_death", "no_division"}
-    assert by_dec["division"]["upper_frame"] == 4
-    assert by_dec["pi_positive_death"]["upper_frame"] == 3
-    assert len(by_dec["no_division"]["observation_ids"]) == 8
+    decs = [r["decision"] for r in rows]
+    assert sorted(decs) == ["division", "no_division", "no_division"]
+    div_row = next(r for r in rows if r["decision"] == "division")
+    assert div_row["upper_frame"] == 4
 
-    # Workbench adapter must load founder_v2 runs (including death fates) without error
+    # Non-circular PI default: PI-surging founder is tracked to recording end and annotated
+    events_by_fid = res["founder_events"]
+    statuses = sorted(ev["pi_status"] for ev in events_by_fid.values())
+    assert statuses == ["divided", "low_pi", "probably_dead"]
+    pi_ev = next(ev for ev in events_by_fid.values() if ev["pi_status"] == "probably_dead")
+    assert pi_ev["decision"] == "no_division"
+    assert pi_ev["pi_surge_frame"] == 3
+    assert pi_ev["last_identity_frame"] == 7
+    assert "pi_probably_dead" in pi_ev["flags"]
+    assert len(pi_ev["observation_ids"]) == 8
+
+    # Workbench adapter must load founder_v2 runs cleanly
     wb = RunReviewModel(p.root, res["run_id"], read_only=True)
     st = wb.state()
     assert len(st["records"]) == 3
     assert {r["tracking_end_reason"] for r in st["records"]} == {
         "division",
-        "pi_positive_death",
         "recording_end",
     }
+
+
+def test_early_colony_engulfment_vs_growing_divider():
+    shape = (128, 160)
+
+    # Case A: Non-growing founder encircled by >=2 invading neighbors from f=4 onward
+    labs_a, phs_a = [], []
+    for f in range(9):
+        ph = _make_bg(shape, val=2000.0, noise=5.0, seed=410 + f)
+        lbl = np.zeros(shape, dtype=np.int32)
+        _draw_rod(lbl, ph, 1, 60, 50, 70)  # founder stays constant size
+        if f >= 4:
+            # Colony front arrives tightly above and below the founder (within 2 px!)
+            _draw_rod(lbl, ph, 2, 50, 46, 74)
+            _draw_rod(lbl, ph, 3, 70, 46, 74)
+        labs_a.append(lbl)
+        phs_a.append(ph)
+
+    res_a = track_founder(labs_a, 60.0, 60.0, phase_seq=phs_a)
+    assert res_a.decision == "lost"
+    assert res_a.tracking_end_reason == "engulfed"
+    assert res_a.event_frame == 4
+    assert res_a.last_identity_frame == 3
+    assert 4 not in res_a.frame_labels
+
+    # Case B: Invader jump — sudden >=1.6x area jump while crowded on a single frame
+    labs_b, phs_b = [], []
+    for f in range(8):
+        ph = _make_bg(shape, val=2000.0, noise=5.0, seed=430 + f)
+        lbl = np.zeros(shape, dtype=np.int32)
+        if f < 4:
+            _draw_rod(lbl, ph, 1, 60, 50, 70)
+        else:
+            # Founder mask suddenly absorbs extra mass (>1.7x) while flanked by 2 neighbors
+            _draw_rod(lbl, ph, 1, 60, 42, 78)
+            _draw_rod(lbl, ph, 2, 50, 42, 78)
+            _draw_rod(lbl, ph, 3, 70, 42, 78)
+        labs_b.append(lbl)
+        phs_b.append(ph)
+
+    res_b = track_founder(labs_b, 60.0, 60.0, phase_seq=phs_b)
+    assert res_b.decision == "lost"
+    assert res_b.tracking_end_reason == "engulfed"
+    assert res_b.event_frame == 4
+    assert res_b.last_identity_frame == 3
+
+    # Case C: Growing divider (>1.5x area0) with only 2 flanking neighbors (not >=3 strong encirclement) divides cleanly
+    labs_c, phs_c = [], []
+    for f in range(9):
+        ph = _make_bg(shape, val=2000.0, noise=5.0, seed=450 + f)
+        lbl = np.zeros(shape, dtype=np.int32)
+        if f < 5:
+            # Grows to >1.5x before f=4 so growth exemption applies
+            _draw_rod(lbl, ph, 1, 60, 45, 65 + f * 4)
+        else:
+            _draw_rod(lbl, ph, 1, 60, 42, 62)
+            _draw_rod(lbl, ph, 4, 60, 65, 85)
+        if f >= 4:
+            # Two neighbors graze one side (n_oth = 2 < strong_neighbors = 3)
+            _draw_rod(lbl, ph, 2, 50, 42, 62)
+            _draw_rod(lbl, ph, 3, 50, 65, 85)
+        labs_c.append(lbl)
+        phs_c.append(ph)
+
+    res_c = track_founder(labs_c, 60.0, 55.0, phase_seq=phs_c)
+    assert res_c.decision == "division"
+    assert res_c.event_frame == 5
+
+
+def test_ghost_lysis_field_burst_veto_preserves_single_cell_lysis():
+    shape = (200, 240)
+    coords = {
+        "c1": (35.0, 45.0),
+        "c2": (35.0, 145.0),
+        "c3": (100.0, 95.0),
+        "c4": (165.0, 45.0),
+        "c5": (165.0, 145.0),
+    }
+
+    # Case A: Synchronized field-wide disappearance of all 5 founders at f=4..9 -> burst veto blocks ghost_lysis!
+    labs_burst, phs_burst = [], []
+    for f in range(11):
+        ph = _make_bg(shape, val=2000.0, noise=5.0, seed=500 + f)
+        lbl = np.zeros(shape, dtype=np.int32)
+        if f < 4:
+            for idx, (cy, cx) in enumerate(coords.values(), start=1):
+                _draw_rod(lbl, ph, idx, int(cy), int(cx) - 10, int(cx) + 10)
+        labs_burst.append(lbl)
+        phs_burst.append(ph)
+
+    res_burst = track_field(labs_burst, coords, phase_seq=phs_burst)
+    assert all(r.decision == "lost" and r.tracking_end_reason == "missing" for r in res_burst.values())
+
+    # Case B: Single-cell lysis (only c3 vanishes at f=4..9 while 4 others stay intact) -> c3 IS ghost_lysis!
+    labs_single, phs_single = [], []
+    for f in range(11):
+        ph = _make_bg(shape, val=2000.0, noise=5.0, seed=550 + f)
+        lbl = np.zeros(shape, dtype=np.int32)
+        for idx, (fid, (cy, cx)) in enumerate(coords.items(), start=1):
+            if fid == "c3" and f >= 4:
+                continue
+            _draw_rod(lbl, ph, idx, int(cy), int(cx) - 10, int(cx) + 10)
+        labs_single.append(lbl)
+        phs_single.append(ph)
+
+    res_single = track_field(labs_single, coords, phase_seq=phs_single)
+    assert res_single["c3"].decision == "ghost_lysis"
+    assert res_single["c3"].event_frame == 4
+    for fid in ("c1", "c2", "c4", "c5"):
+        assert res_single[fid].decision == "no_division"
+
 
