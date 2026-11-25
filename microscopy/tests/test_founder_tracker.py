@@ -20,6 +20,7 @@ from microscopy.founder_tracker import (
     compute_notch_ratio,
     estimate_frame_shift,
     filter_phase_dark_labels,
+    group_frame0_founders,
     measure_footprint_channels,
     score_frame0_founder,
     track_field,
@@ -247,10 +248,11 @@ def test_pi_positive_death_in_track_vs_healthy_high_baseline_decay():
 
 def test_ghost_lysis_anti_shove_distinction():
     shape = (128, 160)
+    ghost_cfg = TrackerConfig(enable_ghost_lysis=True)
 
     # Case A: True empty-footprint phase-ghost lysis at f=4
     labs_a, phs_a = [], []
-    for f in range(8):
+    for f in range(11):
         ph = _make_bg(shape, val=2000.0, noise=5.0, seed=90 + f)
         lbl = np.zeros(shape, dtype=np.int32)
         if f < 4:
@@ -261,7 +263,13 @@ def test_ghost_lysis_anti_shove_distinction():
         labs_a.append(lbl)
         phs_a.append(ph)
 
-    res_lysis = track_founder(labs_a, 60.0, 50.0, phase_seq=phs_a)
+    # Default config has ghost_lysis disabled -> lost (missing)
+    res_default = track_founder(labs_a, 60.0, 50.0, phase_seq=phs_a)
+    assert res_default.decision == "lost"
+    assert res_default.tracking_end_reason == "missing"
+
+    # Opt-in enable_ghost_lysis=True calls ghost_lysis at f=4
+    res_lysis = track_founder(labs_a, 60.0, 50.0, phase_seq=phs_a, cfg=ghost_cfg)
     assert res_lysis.decision == "ghost_lysis"
     assert res_lysis.event_frame == 4
     assert res_lysis.delta_r is not None and res_lysis.delta_r >= 0.25
@@ -283,7 +291,7 @@ def test_ghost_lysis_anti_shove_distinction():
         labs_b.append(lbl)
         phs_b.append(ph)
 
-    res_shove = track_founder(labs_b, 60.0, 50.0, phase_seq=phs_b)
+    res_shove = track_founder(labs_b, 60.0, 50.0, phase_seq=phs_b, cfg=ghost_cfg)
     assert res_shove.decision != "ghost_lysis"
     assert res_shove.decision == "lost"
 
@@ -301,7 +309,7 @@ def test_ghost_lysis_anti_shove_distinction():
         labs_c.append(lbl)
         phs_c.append(ph)
 
-    res_shift = track_founder(labs_c, 60.0, 50.0, phase_seq=phs_c)
+    res_shift = track_founder(labs_c, 60.0, 50.0, phase_seq=phs_c, cfg=ghost_cfg)
     assert res_shift.decision != "ghost_lysis"
     assert res_shift.decision == "lost"
 
@@ -324,7 +332,7 @@ def test_ghost_lysis_blocked_by_bright_colony_halo():
         labs.append(lbl)
         phs.append(ph)
 
-    res = track_founder(labs, 60.0, 50.0, phase_seq=phs)
+    res = track_founder(labs, 60.0, 50.0, phase_seq=phs, cfg=TrackerConfig(enable_ghost_lysis=True))
     assert res.decision != "ghost_lysis"
     assert res.decision == "lost"
 
@@ -585,6 +593,7 @@ def test_early_colony_engulfment_vs_growing_divider():
 
 def test_ghost_lysis_field_burst_veto_preserves_single_cell_lysis():
     shape = (200, 240)
+    ghost_cfg = TrackerConfig(enable_ghost_lysis=True)
     coords = {
         "c1": (35.0, 45.0),
         "c2": (35.0, 145.0),
@@ -604,7 +613,7 @@ def test_ghost_lysis_field_burst_veto_preserves_single_cell_lysis():
         labs_burst.append(lbl)
         phs_burst.append(ph)
 
-    res_burst = track_field(labs_burst, coords, phase_seq=phs_burst)
+    res_burst = track_field(labs_burst, coords, phase_seq=phs_burst, cfg=ghost_cfg)
     assert all(r.decision == "lost" and r.tracking_end_reason == "missing" for r in res_burst.values())
 
     # Case B: Single-cell lysis (only c3 vanishes at f=4..9 while 4 others stay intact) -> c3 IS ghost_lysis!
@@ -619,10 +628,115 @@ def test_ghost_lysis_field_burst_veto_preserves_single_cell_lysis():
         labs_single.append(lbl)
         phs_single.append(ph)
 
-    res_single = track_field(labs_single, coords, phase_seq=phs_single)
+    res_single = track_field(labs_single, coords, phase_seq=phs_single, cfg=ghost_cfg)
     assert res_single["c3"].decision == "ghost_lysis"
     assert res_single["c3"].event_frame == 4
     for fid in ("c1", "c2", "c4", "c5"):
         assert res_single[fid].decision == "no_division"
+
+    # Under default config (enable_ghost_lysis=False), c3 resolves cleanly as lost (missing)
+    res_default = track_field(labs_single, coords, phase_seq=phs_single)
+    assert res_default["c3"].decision == "lost"
+    assert res_default["c3"].tracking_end_reason == "missing"
+
+
+def test_group_frame0_founders_partitions_singlets_doublets_clusters_edge_ripples():
+    shape = (200, 240)
+    ph = _make_bg(shape, val=2000.0, noise=5.0, seed=600)
+    lbl = np.zeros(shape, dtype=np.int32)
+
+    # 1: Isolated singlet
+    _draw_rod(lbl, ph, 1, 50, 40, 60)
+    # 2 & 3: Touching doublet pair (2 px gap <= isolation_px=5)
+    _draw_rod(lbl, ph, 2, 100, 50, 70)
+    _draw_rod(lbl, ph, 3, 100, 73, 93)
+    # 4, 5, 6: 3-cell cluster (excluded)
+    _draw_rod(lbl, ph, 4, 150, 50, 70)
+    _draw_rod(lbl, ph, 5, 150, 73, 93)
+    _draw_rod(lbl, ph, 6, 150, 96, 116)
+    # 7: Edge cell (within 10 px of border)
+    _draw_rod(lbl, ph, 7, 5, 150, 170, half_w=3)
+    # 8: Bright background ripple (filtered by phase darkness)
+    lbl[40:50, 160:185] = 8
+    ph[40:50, 160:185] = 1980.0
+
+    tracked, excluded = group_frame0_founders(lbl, ph, isolation_px=5, edge_margin_px=10, include_doublets=True)
+    assert len(tracked) == 2
+    singlet = next(t for t in tracked if not t["is_doublet"])
+    doublet = next(t for t in tracked if t["is_doublet"])
+    assert singlet["label_ids"] == [1]
+    assert singlet["initial_count"] == 1
+    assert doublet["label_ids"] == [2, 3]
+    assert doublet["initial_count"] == 2
+    assert len(doublet["seeds"]) == 2
+
+    reasons = {e["reason"]: e for e in excluded}
+    assert set(reasons.keys()) == {"edge", "cluster", "not_phase_dark"}
+    assert reasons["cluster"]["label_ids"] == [4, 5, 6]
+    assert reasons["edge"]["label_ids"] == [7]
+    assert reasons["not_phase_dark"]["label_ids"] == [8]
+
+    # When include_doublets=False, the doublet moves to excluded with reason 'not_isolated'
+    tracked_no_d, excluded_no_d = group_frame0_founders(
+        lbl, ph, isolation_px=5, edge_margin_px=10, include_doublets=False
+    )
+    assert len(tracked_no_d) == 1
+    assert any(e["reason"] == "not_isolated" and e["label_ids"] == [2, 3] for e in excluded_no_d)
+
+
+def test_paired_doublet_tracking_dividing_and_static_self_contact_immunity():
+    shape = (160, 200)
+
+    # Doublet A (y=50): 2 touching cells; right half grows & divides into 2 -> 3 total cells at f=4
+    # Doublet B (y=115): 2 touching non-dividing cells that transiently merge into 1 mask on f=3..4
+    #                    (must NOT falsely die to self-contact; ends as no_division)
+    labs, phs = [], []
+    for f in range(8):
+        ph = _make_bg(shape, val=2000.0, noise=5.0, seed=700 + f)
+        lbl = np.zeros(shape, dtype=np.int32)
+
+        # Doublet A
+        _draw_rod(lbl, ph, 1, 50, 40, 58)
+        if f < 4:
+            _draw_rod(lbl, ph, 2, 50, 60, 78 + f * 3)
+        else:
+            _draw_rod(lbl, ph, 2, 50, 60, 76)
+            _draw_rod(lbl, ph, 3, 50, 78, 96)
+
+        # Doublet B
+        if f in (3, 4):
+            # Single merged Omnipose mask spanning both halves of the doublet
+            _draw_rod(lbl, ph, 10, 115, 40, 80)
+        else:
+            _draw_rod(lbl, ph, 10, 115, 40, 59)
+            _draw_rod(lbl, ph, 11, 115, 61, 80)
+
+        labs.append(lbl)
+        phs.append(ph)
+
+    res = track_field(
+        labs,
+        {
+            "dbl_div": [(50.0, 49.0), (50.0, 69.0)],
+            "dbl_static": [(115.0, 49.0), (115.0, 70.0)],
+        },
+        phase_seq=phs,
+    )
+
+    r_div = res["dbl_div"]
+    assert r_div.decision == "division"
+    assert r_div.event_frame == 4
+    assert r_div.is_doublet is True
+    assert r_div.initial_count == 2
+    assert "frame0_doublet_pair" in r_div.flags
+    assert r_div.frame_labels[0] == [1, 2]
+
+    r_stat = res["dbl_static"]
+    assert r_stat.decision == "no_division"
+    assert r_stat.is_doublet is True
+    assert r_stat.initial_count == 2
+    assert "frame0_doublet_pair" in r_stat.flags
+    assert r_stat.last_identity_frame == 7
+
 
 

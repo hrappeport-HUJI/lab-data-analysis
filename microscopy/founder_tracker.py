@@ -21,16 +21,19 @@ colony-wide object graphs. Key mechanisms:
      sustained for ``pi_streak`` frames (safe against healthy cells with
      decaying elevated frame-0 PI), plus persistent high-level baseline dead
      cells that never decay or grow.
-   - ``ghost_lysis``: abrupt phase-neutral/bright transition (``delta_r >= 0.25``
-     and ``r_post >= -0.08``) on loss where no dark/segmented neighbouring cell
-     occupies or lies within ``ghost_clear_radius_px`` (~10 px) of the shifted
-     last footprint (preventing neighbour-shove false lysis calls).
-   - ``no_division``: intact single-cell lineage followed to the end of the
-     recording, annotated with ``growth_ratio`` and ``elongation_ratio``.
-   - ``lost``: ``contact``, ``edge``, ``missing``, or ``defocus_truncated``.
-6. **Frame-0 doublet & debris scoring**: ``notch_ratio`` along major axis,
-   ``solidity0``, ``touching_neighbour``, ``length_z``, ``area_z``, and optional
-   ``baseline_yfp_net``.
+   - ``no_division``: intact single-cell (or paired doublet) lineage followed to
+     the end of the recording, annotated with ``growth_ratio``,
+     ``elongation_ratio``, and observational ``pi_status``.
+   - ``lost``: ``contact``, ``engulfed``, ``edge``, ``missing``, or
+     ``defocus_truncated``.
+   - ``ghost_lysis`` (opt-in via ``enable_ghost_lysis=True``): abrupt
+     phase-neutral/bright transition on loss with empty surroundings.
+6. **Frame-0 founder grouping, paired doublets & debris scoring**:
+   :func:`group_frame0_founders` separates isolated singlets, touching 2-cell
+   doublet pairs (tracked jointly with ``initial_count=2``, ``is_doublet=True``,
+   and flag ``"frame0_doublet_pair"`` so downstream analysis can optionally
+   include or filter them), and excluded objects (edge, multi-cell clusters,
+   non-phase-dark ripples) with explicit exclusion reasons.
 """
 
 from __future__ import annotations
@@ -108,7 +111,8 @@ class TrackerConfig:
     pi_probably_dead_last_min: float = 800.0
     pi_intermediate_min: float = 150.0
 
-    # Anti-shove, field-normalized phase-ghost lysis calling
+    # Anti-shove, field-normalized phase-ghost lysis calling (opt-in; disabled by default)
+    enable_ghost_lysis: bool = False
     ghost_delta_r: float = 0.25
     ghost_r_post_min: float = -0.08
     ghost_clear_radius_px: int = 14
@@ -145,6 +149,8 @@ class FounderResult:
     last_identity_frame: int
     tracking_end_reason: str
     label0: int = 0
+    initial_count: int = 1
+    is_doublet: bool = False
     area0: int = 0
     max_area: int = 0
     last_area: int = 0
@@ -178,6 +184,8 @@ class FounderResult:
             "last_identity_frame": self.last_identity_frame,
             "tracking_end_reason": self.tracking_end_reason,
             "label0": self.label0,
+            "initial_count": self.initial_count,
+            "is_doublet": self.is_doublet,
             "area0": self.area0,
             "max_area": self.max_area,
             "last_area": self.last_area,
@@ -669,13 +677,226 @@ def _neighborhood_crowding(
     return touch_frac, near_frac, n_other
 
 
-def _first_division(counts: list[tuple[int, int]], persist: int) -> int | None:
+def _first_division(counts: list[tuple[int, int]], persist: int, min_count: int = 2) -> int | None:
     if len(counts) < persist:
         return None
     for i in range(len(counts) - persist + 1):
-        if all(n >= 2 for _, n in counts[i : i + persist]):
+        if all(n >= min_count for _, n in counts[i : i + persist]):
             return counts[i][0]
     return None
+
+
+def _normalize_seed_points(spec: Any) -> list[tuple[float, float]]:
+    """Normalize a founder seed spec into a list of ``(y, x)`` tuples.
+
+    Accepts either a single ``(y, x)`` coordinate pair (singlet) or a sequence
+    of ``(y, x)`` coordinate pairs (e.g. a touching frame-0 doublet pair).
+    """
+    if isinstance(spec, (tuple, list, np.ndarray)) and len(spec) == 2:
+        a, b = spec[0], spec[1]
+        if isinstance(a, (int, float, np.number)) and isinstance(b, (int, float, np.number)):
+            return [(float(a), float(b))]
+    pts: list[tuple[float, float]] = []
+    for item in spec:
+        pts.append((float(item[0]), float(item[1])))
+    return pts
+
+
+def group_frame0_founders(
+    labels0: np.ndarray,
+    phase0: np.ndarray | None = None,
+    *,
+    isolation_px: int = 5,
+    edge_margin_px: int = 10,
+    include_doublets: bool = True,
+    min_area_px: int = 0,
+    dark_ratio_max: float = 0.85,
+    dark_filter_applied: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Partition frame-0 objects into tracked founders (singlets + optional doublets) and excluded objects.
+
+    Uses the exact Manhattan dilation radius ``isolation_px`` from
+    ``pipeline.py`` to build proximity connected components among phase-dark
+    frame-0 labels:
+    - Size 1 away from border -> tracked singlet (``initial_count=1``, ``is_doublet=False``).
+    - Size 2 away from border -> tracked doublet pair when ``include_doublets=True``
+      (``initial_count=2``, ``is_doublet=True``), or excluded as ``not_isolated``
+      when ``include_doublets=False``.
+    - Size >= 3 -> excluded as ``cluster`` with count detail.
+    - Within ``edge_margin_px`` of border -> excluded as ``edge``.
+    - Filtered by phase-darkness check -> excluded as ``not_phase_dark``.
+
+    Returns:
+        ``(tracked, excluded)`` lists sorted by ``(y, x)`` centroid.
+    """
+    h, w = labels0.shape[:2]
+    raw_boxes = ndi.find_objects(labels0)
+    raw_ids = [lid for lid, bx in enumerate(raw_boxes, start=1) if bx is not None]
+
+    if phase0 is not None and not dark_filter_applied:
+        bg_p0 = fast_bg_median(phase0)
+        l0 = filter_phase_dark_labels(labels0, phase0, bg_median=bg_p0, dark_ratio_max=dark_ratio_max)
+    else:
+        l0 = labels0
+
+    dark_boxes = ndi.find_objects(l0)
+    dark_ids = {lid for lid, bx in enumerate(dark_boxes, start=1) if bx is not None}
+
+    excluded: list[dict[str, Any]] = []
+    kept_dark: list[int] = []
+    props_raw: dict[int, tuple[float, float, int, tuple[int, int, int, int]]] = {}
+
+    for lid in raw_ids:
+        bx = raw_boxes[lid - 1]
+        assert bx is not None
+        y0, y1 = int(bx[0].start), int(bx[0].stop)
+        x0, x1 = int(bx[1].start), int(bx[1].stop)
+        m = labels0[y0:y1, x0:x1] == lid
+        ys, xs = np.nonzero(m)
+        area = int(ys.size)
+        cy = float(ys.mean() + y0) if area else float(0.5 * (y0 + y1))
+        cx = float(xs.mean() + x0) if area else float(0.5 * (x0 + x1))
+        props_raw[lid] = (cy, cx, area, (y0, y1, x0, x1))
+
+        if area < min_area_px:
+            excluded.append(
+                {
+                    "label_ids": [lid],
+                    "y": cy,
+                    "x": cx,
+                    "area": area,
+                    "bbox": (y0, y1, x0, x1),
+                    "reason": "too_small",
+                    "reason_detail": f"area {area} px < min_area_px ({min_area_px})",
+                }
+            )
+            continue
+        if lid not in dark_ids:
+            excluded.append(
+                {
+                    "label_ids": [lid],
+                    "y": cy,
+                    "x": cx,
+                    "area": area,
+                    "bbox": (y0, y1, x0, x1),
+                    "reason": "not_phase_dark",
+                    "reason_detail": f"non-phase-dark object / background ripple (median/bg > {dark_ratio_max:.2f})",
+                }
+            )
+            continue
+        kept_dark.append(lid)
+
+    # Build proximity adjacency graph on kept dark labels (Manhattan dilation by isolation_px)
+    kept_set = set(kept_dark)
+    adj: dict[int, set[int]] = {lid: set() for lid in kept_dark}
+    rad = int(max(0, isolation_px))
+    if rad > 0:
+        for lid in kept_dark:
+            _, _, _, (y0, y1, x0, x1) = props_raw[lid]
+            py0, py1 = max(0, y0 - rad - 1), min(h, y1 + rad + 1)
+            px0, px1 = max(0, x0 - rad - 1), min(w, x1 + rad + 1)
+            sub = l0[py0:py1, px0:px1]
+            m = sub == lid
+            dil = ndi.binary_dilation(m, iterations=rad)
+            nbrs = np.unique(sub[dil & (sub > 0) & (~m)])
+            for nid in nbrs:
+                nid_i = int(nid)
+                if nid_i in kept_set:
+                    adj[lid].add(nid_i)
+                    adj[nid_i].add(lid)
+
+    visited: set[int] = set()
+    tracked: list[dict[str, Any]] = []
+    for lid in kept_dark:
+        if lid in visited:
+            continue
+        comp: list[int] = []
+        stack = [lid]
+        visited.add(lid)
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            for nb in adj[cur]:
+                if nb not in visited:
+                    visited.add(nb)
+                    stack.append(nb)
+        comp.sort()
+
+        total_area = sum(props_raw[c][2] for c in comp)
+        cy = sum(props_raw[c][0] * props_raw[c][2] for c in comp) / max(total_area, 1)
+        cx = sum(props_raw[c][1] * props_raw[c][2] for c in comp) / max(total_area, 1)
+        uy0 = min(props_raw[c][3][0] for c in comp)
+        uy1 = max(props_raw[c][3][1] for c in comp)
+        ux0 = min(props_raw[c][3][2] for c in comp)
+        ux1 = max(props_raw[c][3][3] for c in comp)
+        at_edge = min(ux0, uy0, w - ux1, h - uy1) < edge_margin_px
+
+        if at_edge:
+            if len(comp) == 1:
+                detail = f"edge (within {edge_margin_px} px of frame border)"
+            else:
+                detail = f"edge (within {edge_margin_px} px of frame border; {len(comp)} touching objects)"
+            excluded.append(
+                {
+                    "label_ids": comp,
+                    "y": cy,
+                    "x": cx,
+                    "area": total_area,
+                    "bbox": (uy0, uy1, ux0, ux1),
+                    "reason": "edge",
+                    "reason_detail": detail,
+                }
+            )
+            continue
+
+        if len(comp) == 1:
+            tracked.append(
+                {
+                    "label_ids": comp,
+                    "seeds": [(props_raw[comp[0]][0], props_raw[comp[0]][1])],
+                    "y": cy,
+                    "x": cx,
+                    "area": total_area,
+                    "bbox": (uy0, uy1, ux0, ux1),
+                    "initial_count": 1,
+                    "is_doublet": False,
+                }
+            )
+        elif len(comp) == 2 and include_doublets:
+            tracked.append(
+                {
+                    "label_ids": comp,
+                    "seeds": [(props_raw[c][0], props_raw[c][1]) for c in comp],
+                    "y": cy,
+                    "x": cx,
+                    "area": total_area,
+                    "bbox": (uy0, uy1, ux0, ux1),
+                    "initial_count": 2,
+                    "is_doublet": True,
+                }
+            )
+        else:
+            reason = "not_isolated" if len(comp) == 2 else "cluster"
+            detail = (
+                f"touching doublet (2 objects within {isolation_px} px)"
+                if len(comp) == 2
+                else f"cluster ({len(comp)} touching objects within {isolation_px} px)"
+            )
+            excluded.append(
+                {
+                    "label_ids": comp,
+                    "y": cy,
+                    "x": cx,
+                    "area": total_area,
+                    "bbox": (uy0, uy1, ux0, ux1),
+                    "reason": reason,
+                    "reason_detail": detail,
+                }
+            )
+
+    tracked.sort(key=lambda item: (item["y"], item["x"]))
+    excluded.sort(key=lambda item: (item["y"], item["x"]))
+    return tracked, excluded
 
 
 @dataclass
@@ -697,6 +918,8 @@ class _FounderState:
     max_length: float
     last_length: float
     counts: list[tuple[int, int]]
+    initial_count: int = 1
+    is_doublet: bool = False
     missing: int = 0
     first_missing: int | None = None
     contact_streak: int = 0
@@ -749,7 +972,7 @@ class FieldTracker:
     def __init__(
         self,
         labels0: np.ndarray,
-        founders: Mapping[str, tuple[float, float]],
+        founders: Mapping[str, tuple[float, float] | Sequence[tuple[float, float]]],
         phase0: np.ndarray | None = None,
         pi0: np.ndarray | None = None,
         yfp0: np.ndarray | None = None,
@@ -785,25 +1008,31 @@ class FieldTracker:
         bg_pi0 = fast_bg_median(pi0) if pi0 is not None else None
         self.states: dict[str, _FounderState] = {}
 
-        for fid, (fy, fx) in founders.items():
-            cy = int(round(float(fy)))
-            cx = int(round(float(fx)))
-            cy_clamped = min(max(cy, 0), self.H - 1)
-            cx_clamped = min(max(cx, 0), self.W - 1)
-            id0 = int(l0[cy_clamped, cx_clamped])
-            if id0 == 0:
-                rad = self.cfg.max_lost_dist_px + 4
-                y_lo, y_hi = max(0, cy_clamped - rad), min(self.H, cy_clamped + rad + 1)
-                x_lo, x_hi = max(0, cx_clamped - rad), min(self.W, cx_clamped + rad + 1)
-                ys, xs = np.nonzero(l0[y_lo:y_hi, x_lo:x_hi])
-                if len(ys):
-                    ys_g = ys + y_lo
-                    xs_g = xs + x_lo
-                    k = int(np.argmin((ys_g - cy_clamped) ** 2 + (xs_g - cx_clamped) ** 2))
-                    if float(np.hypot(ys_g[k] - cy_clamped, xs_g[k] - cx_clamped)) <= self.cfg.max_lost_dist_px:
-                        id0 = int(l0[ys_g[k], xs_g[k]])
+        for fid, seed_spec in founders.items():
+            seed_pts = _normalize_seed_points(seed_spec)
+            seed_lids: list[int] = []
+            for fy, fx in seed_pts:
+                cy = int(round(float(fy)))
+                cx = int(round(float(fx)))
+                cy_clamped = min(max(cy, 0), self.H - 1)
+                cx_clamped = min(max(cx, 0), self.W - 1)
+                lid = int(l0[cy_clamped, cx_clamped])
+                if lid == 0:
+                    rad = self.cfg.max_lost_dist_px + 4
+                    y_lo, y_hi = max(0, cy_clamped - rad), min(self.H, cy_clamped + rad + 1)
+                    x_lo, x_hi = max(0, cx_clamped - rad), min(self.W, cx_clamped + rad + 1)
+                    ys, xs = np.nonzero(l0[y_lo:y_hi, x_lo:x_hi])
+                    if len(ys):
+                        ys_g = ys + y_lo
+                        xs_g = xs + x_lo
+                        k = int(np.argmin((ys_g - cy_clamped) ** 2 + (xs_g - cx_clamped) ** 2))
+                        if float(np.hypot(ys_g[k] - cy_clamped, xs_g[k] - cx_clamped)) <= self.cfg.max_lost_dist_px:
+                            lid = int(l0[ys_g[k], xs_g[k]])
+                if lid > 0 and lid not in seed_lids:
+                    seed_lids.append(lid)
 
-            if id0 == 0:
+            seed_lids.sort()
+            if not seed_lids:
                 res = FounderResult(
                     founder_id=fid,
                     decision="not_segmented",
@@ -835,10 +1064,19 @@ class FieldTracker:
                 )
                 continue
 
-            box = pop_stats["boxes"][id0 - 1]
-            by0, by1 = int(box[0].start), int(box[0].stop)
-            bx0, bx1 = int(box[1].start), int(box[1].stop)
-            fam_crop = l0[by0:by1, bx0:bx1] == id0
+            id0 = seed_lids[0]
+            initial_count = len(seed_lids)
+            is_doublet = initial_count == 2
+            seed_boxes = [pop_stats["boxes"][lid - 1] for lid in seed_lids]
+            by0 = min(int(b[0].start) for b in seed_boxes)
+            by1 = max(int(b[0].stop) for b in seed_boxes)
+            bx0 = min(int(b[1].start) for b in seed_boxes)
+            bx1 = max(int(b[1].stop) for b in seed_boxes)
+            fam_crop = (
+                (l0[by0:by1, bx0:bx1] == id0)
+                if initial_count == 1
+                else np.isin(l0[by0:by1, bx0:bx1], seed_lids)
+            )
             area0 = int(fam_crop.sum())
             length0 = _major_axis_length(fam_crop)
             base_touch, base_near, _ = _neighborhood_crowding(
@@ -865,18 +1103,33 @@ class FieldTracker:
                 if phase0 is not None
                 else {"label_id": id0, "area0": area0, "length_px": round(length0, 2), "flags": []}
             )
+            if initial_count > 1:
+                scores = dict(scores)
+                scores["label_ids"] = list(seed_lids)
+                scores["area0"] = area0
+                scores["initial_count"] = initial_count
+                scores["is_doublet"] = is_doublet
+                sc_flags = list(scores.get("flags", []))
+                tag = "frame0_doublet_pair" if is_doublet else f"frame0_cluster_{initial_count}"
+                if tag not in sc_flags:
+                    sc_flags.append(tag)
+                scores["flags"] = sc_flags
 
-            r0 = scores.get("refractility0") if phase0 is not None else None
+            r0 = scores.get("refractility0") if (phase0 is not None and initial_count == 1) else None
             pi0_net = None
-            if pi0 is not None:
+            if pi0 is not None or (phase0 is not None and initial_count > 1):
                 pad_pi = self.cfg.ring_outer_px + 2
                 py0, py1 = max(0, by0 - pad_pi), min(self.H, by1 + pad_pi)
                 px0, px1 = max(0, bx0 - pad_pi), min(self.W, bx1 + pad_pi)
-                sub_m = l0[py0:py1, px0:px1] == id0
+                sub_m = (
+                    (l0[py0:py1, px0:px1] == id0)
+                    if initial_count == 1
+                    else np.isin(l0[py0:py1, px0:px1], seed_lids)
+                )
                 r0_val, pi0_net, _, _ = measure_footprint_channels(
                     sub_m,
                     phase0[py0:py1, px0:px1] if phase0 is not None else np.ones_like(sub_m, dtype=np.float32),
-                    pi_crop=pi0[py0:py1, px0:px1],
+                    pi_crop=pi0[py0:py1, px0:px1] if pi0 is not None else None,
                     dark_labels_crop=l0[py0:py1, px0:px1],
                     bg_phase=bg_p0,
                     bg_pi_fallback=bg_pi0,
@@ -886,6 +1139,8 @@ class FieldTracker:
                 )
                 if r0 is None and phase0 is not None:
                     r0 = r0_val
+                    if initial_count > 1:
+                        scores["refractility0"] = round(float(r0), 4)
 
             st = _FounderState(
                 founder_id=fid,
@@ -904,7 +1159,9 @@ class FieldTracker:
                 last_area=area0,
                 max_length=max(length0, 1.0),
                 last_length=max(length0, 1.0),
-                counts=[(0, 1)],
+                counts=[(0, initial_count)],
+                initial_count=initial_count,
+                is_doublet=is_doublet,
                 started_at_edge=(by0 == 0 or bx0 == 0 or by1 == self.H or bx1 == self.W),
                 base_touch_frac=base_touch,
                 base_near_frac=base_near,
@@ -916,7 +1173,7 @@ class FieldTracker:
                 pi_last=pi0_net,
                 frame0_scores=scores,
                 flags=list(scores.get("flags", [])),
-                frame_labels={0: [int(id0)]},
+                frame_labels={0: list(seed_lids)},
             )
             if pi0_net is not None and pi0_net >= self.cfg.pi_high_baseline_min:
                 st.pi_high_streak = 1
@@ -1027,6 +1284,8 @@ class FieldTracker:
             last_identity_frame=int(st.last_seen),
             tracking_end_reason=reason,
             label0=st.label0,
+            initial_count=st.initial_count,
+            is_doublet=st.is_doublet,
             area0=st.area0,
             max_area=st.max_area,
             last_area=st.last_area,
@@ -1216,6 +1475,7 @@ class FieldTracker:
             new_by1: int
             new_bx0: int
             new_bx1: int
+            eff_frac = cfg.frac / st.initial_count
             if (
                 (int(mys.min()) == 0 and y0 > 0)
                 or (int(mxs.min()) == 0 and x0 > 0)
@@ -1236,7 +1496,7 @@ class FieldTracker:
                     new_fam_crop = full_m[new_by0:new_by1, new_bx0:new_bx1]
                     m_sum = int(new_fam_crop.sum())
                     sub_lab = labs_f[new_by0:new_by1, new_bx0:new_bx1]
-                    big_count = sum(1 for lid in member_lids if int((sub_lab == lid).sum()) >= cfg.frac * m_sum)
+                    big_count = sum(1 for lid in member_lids if int((sub_lab == lid).sum()) >= eff_frac * m_sum)
                     expanded_to_full = True
 
             if not expanded_to_full:
@@ -1253,16 +1513,17 @@ class FieldTracker:
                 new_fam_crop = m[new_by0 - y0 : new_by1 - y0, new_bx0 - x0 : new_bx1 - x0]
                 m_sum = int(new_fam_crop.sum())
                 if split_applied and not members:
-                    # Single merged blob split by EDT alone must not fabricate a 2-daughter split
+                    # Single merged blob split by EDT alone must not fabricate a division split
                     big_count = 1
                 else:
                     big_areas = [int(area[i]) for i in members]
                     if split_mask is not None:
                         big_areas.append(int(split_mask.sum()))
-                    big_count = sum(1 for a_px in big_areas if a_px >= cfg.frac * m_sum)
+                    big_count = sum(1 for a_px in big_areas if a_px >= eff_frac * m_sum)
 
             # Early colony-encroachment ('engulfed') check before committing this frame's mask
             prev_area = st.last_area
+            eff_exempt = 1.0 + (cfg.encroach_growth_exempt - 1.0) / st.initial_count
             if cfg.enable_engulfment_check and frame_idx >= cfg.encroach_min_frame:
                 touch_f, near_f, n_oth = _neighborhood_crowding(
                     labs_f,
@@ -1285,7 +1546,7 @@ class FieldTracker:
                 )
                 if (
                     is_crowded
-                    and prev_area < cfg.encroach_growth_exempt * max(st.area0, 1)
+                    and prev_area < eff_exempt * max(st.area0, 1)
                     and m_sum >= cfg.encroach_jump_ratio * max(prev_area, 1)
                 ):
                     newly_finished[fid] = self._finalize(
@@ -1312,7 +1573,7 @@ class FieldTracker:
                     st.strong_encroach_prev_frame = None
 
                 if (
-                    prev_area < cfg.encroach_growth_exempt * max(st.area0, 1)
+                    prev_area < eff_exempt * max(st.area0, 1)
                     and st.encroach_streak >= cfg.encroach_persist
                 ):
                     ev_f = int(st.encroach_first_frame if st.encroach_first_frame is not None else frame_idx)
@@ -1349,6 +1610,9 @@ class FieldTracker:
             cur_len = _major_axis_length(st.fam_crop)
             st.last_length = cur_len
             st.max_length = max(st.max_length, cur_len)
+
+            div_growth = 1.0 + (cfg.growth - 1.0) / st.initial_count
+            eff_pi_growth = 1.0 + (cfg.pi_high_baseline_growth - 1.0) / st.initial_count
 
             # Channel measurements on tracked mask
             if phase_image is not None or pi_image is not None:
@@ -1393,7 +1657,7 @@ class FieldTracker:
                         st.pi_0 is not None
                         and pi_cur >= cfg.pi_high_baseline_min
                         and pi_cur >= cfg.pi_high_baseline_decay * st.pi_0
-                        and m_sum <= cfg.pi_high_baseline_growth * st.area0
+                        and m_sum <= eff_pi_growth * st.area0
                     ):
                         if st.pi_high_streak == 0:
                             st.pi_high_first_frame = frame_idx
@@ -1408,7 +1672,7 @@ class FieldTracker:
                         ev_f = int(st.pi_surge_first_frame if st.pi_surge_first_frame is not None else frame_idx)
                         if st.pi_surge_confirmed_frame is None:
                             st.pi_surge_confirmed_frame = ev_f
-                        if cfg.terminate_on_pi and m_sum < cfg.growth * st.area0:
+                        if cfg.terminate_on_pi and m_sum < div_growth * st.area0:
                             lo_f = int(st.pi_surge_prev_frame if st.pi_surge_prev_frame is not None else st.last_seen)
                             st.last_seen = frame_idx
                             newly_finished[fid] = self._finalize(
@@ -1428,12 +1692,12 @@ class FieldTracker:
                             )
                             continue
 
-            n_daughters = big_count if m_sum >= cfg.growth * st.area0 else 1
+            n_daughters = big_count if m_sum >= div_growth * st.area0 else st.initial_count
             st.counts.append((frame_idx, n_daughters))
             st.last_seen = frame_idx
             st.prev_f = frame_idx
 
-            div_frame = _first_division(st.counts, cfg.persist)
+            div_frame = _first_division(st.counts, cfg.persist, min_count=st.initial_count + 1)
             if div_frame is not None:
                 div_idx = next(i for i, (fr, _) in enumerate(st.counts) if fr == div_frame)
                 lo_frame = st.counts[div_idx - 1][0] if div_idx > 0 else 0
@@ -1493,11 +1757,11 @@ class FieldTracker:
         st.missing += 1
         if st.missing == 1:
             st.first_missing = frame_idx
-        # Anti-shove, focus-gated ghost lysis test: requires persistent phase-neutral/bright
-        # empty footprint on a well-focused frame with neither segmented cells nor raw
-        # phase-dark/bright-halo pixels nearby.
+        # Opt-in anti-shove, focus-gated ghost lysis test (disabled by default via
+        # cfg.enable_ghost_lysis=False).
         if (
-            phase_image is not None
+            cfg.enable_ghost_lysis
+            and phase_image is not None
             and fm_roi.any()
             and st.r_last is not None
             and self.last_focus_ratio >= cfg.ghost_min_focus_ratio
@@ -1574,7 +1838,7 @@ class FieldTracker:
 
 def track_field(
     labels_seq: Sequence[np.ndarray],
-    founders: Mapping[str, tuple[float, float]],
+    founders: Mapping[str, tuple[float, float] | Sequence[tuple[float, float]]],
     phase_seq: Sequence[np.ndarray] | None = None,
     pi_seq: Sequence[np.ndarray] | None = None,
     yfp0: np.ndarray | None = None,
@@ -1776,6 +2040,8 @@ class FounderV2Events:
                 "upper_frame": int(res.upper_frame) + self.baseline,
                 "last_identity_frame": int(res.last_identity_frame) + self.baseline,
                 "tracking_end_reason": res.tracking_end_reason,
+                "initial_count": int(res.initial_count),
+                "is_doublet": bool(res.is_doublet),
                 "contains_gap": bool(res.contains_gap),
                 "flags": list(res.flags),
                 "observation_ids": obs_ids,
