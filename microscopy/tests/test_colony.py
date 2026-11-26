@@ -432,3 +432,94 @@ def test_skip_pairwise_links_in_colony_mode_and_digest_cache(tmp_path, monkeypat
     _ = images_mod.read_frame(project, *key)
     assert len(digest_calls) == 1
 
+
+def contact_scene(kind='split', contact=True):
+    first = np.zeros(SHAPE, np.int32)
+    rod(first, 1, 30, 20, 29)
+    rod(first, 2, 30, 60, 69)
+    grown = first.copy()
+    rod(grown, 1, 30, 20, 43)
+    rod(grown, 2, 30, 50, 69)
+    candidate = grown.copy()
+    if kind == 'split':
+        candidate[candidate == 1] = 0
+        rod(candidate, 1, 30, 20, 29)
+        rod(candidate, 3, 30, 30, 39)
+    elif kind == 'sliver':
+        rod(candidate, 1, 30, 20, 37)
+        rod(candidate, 3, 30, 38, 39)
+    elif kind == 'kink':
+        candidate[candidate == 1] = 0
+        rod(candidate, 1, 30, 20, 32)
+        candidate[30:50, 29:38] = 1
+    elif kind == 'elongated':
+        rod(candidate, 1, 30, 20, 39)
+    merged = candidate.copy()
+    rod(merged, 1, 30, 20, 69)
+    merged[merged == 3] = 1
+    return [first, grown, candidate] + ([merged] if contact else [])
+
+
+@pytest.mark.parametrize('kind', ['split', 'kink'])
+def test_precontact_candidate_is_flagged_with_censored_interval(kind):
+    e = feed(contact_scene(kind))['f0-t0-o1']
+    assert e['decision'] == 'division'
+    assert e['tracking_end_reason'] == 'division_at_contact'
+    assert e['flags'] == ['division_at_contact']
+    assert (e['lower_frame'], e['upper_frame'], e['last_identity_frame']) == (1, 3, 2)
+    assert not any('-t3-' in n for n in e['observation_ids'])
+
+
+@pytest.mark.parametrize('kind', ['elongated', 'sliver'])
+def test_contact_without_credible_daughters_does_not_invent_division(kind):
+    assert feed(contact_scene(kind))['f0-t0-o1']['decision'] == 'lost'
+
+
+def test_terminal_split_without_contact_stays_unconfirmed():
+    assert feed(contact_scene(contact=False))['f0-t0-o1']['tracking_end_reason'] == 'unconfirmed_division_candidate'
+
+
+def test_contact_rescue_requires_prior_growth_and_no_gap():
+    seq = contact_scene()
+    seq[1] = seq[0].copy()
+    assert feed(seq)['f0-t0-o1']['decision'] == 'lost'
+    assert feed(contact_scene(), skip={1})['f0-t0-o1']['decision'] == 'lost'
+
+
+def test_contact_rescue_never_uses_baseline_doublet_or_artificial_partition():
+    # Exercise exclusion guards on the real state produced by a synthetic sequence.
+    seq = contact_scene()
+    events = ColonyEvents()
+    ns = nodes_for(seq[0], 0)
+    events.start(0, seq[0], ns, [{'id':n['id'], 'observation_id':n['id']} for n in ns])
+    for t, labels in enumerate(seq[1:], 1):
+        events.update(t, labels, nodes_for(labels, t))
+    f = events.founders[1]
+    f['eligible'] = False
+    assert events.finish(3)['f0-t0-o1']['decision'] == 'lost'
+    f['eligible'] = True
+    f['solidity0'] = 0.8
+    assert events.finish(3)['f0-t0-o1']['decision'] == 'lost'
+    f['solidity0'] = 1.0
+    f['contact'] = 1
+    assert events.finish(3)['f0-t0-o1']['decision'] == 'lost'
+
+
+def test_contact_area_jump_is_not_daughter_evidence():
+    seq = contact_scene()
+    # Prior growth clears 1.5x but adding a neighbour makes the split area jump >1.3x.
+    seq[1][seq[1] == 1] = 0
+    rod(seq[1], 1, 30, 20, 34)
+    assert feed(seq)['f0-t0-o1']['decision'] == 'lost'
+
+
+def test_contact_rescue_can_be_disabled():
+    e = feed(contact_scene(), {"rescue_division_at_contact": False})['f0-t0-o1']
+    assert e['decision'] == 'lost'
+    assert e['tracking_end_reason'] == 'unconfirmed_division_candidate'
+
+
+def test_contact_area_drop_is_not_reliable_split_evidence():
+    seq = contact_scene()
+    rod(seq[1], 1, 30, 20, 45)
+    assert feed(seq)['f0-t0-o1']['decision'] == 'lost'

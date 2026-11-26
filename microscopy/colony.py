@@ -27,6 +27,9 @@ DEFAULTS = {
     "dent_solidity": 0.8,  # an object less convex than this counts as two cells ...
     "dent_min_growth": 1.7,  # ... once it is this much larger than the founder
     "static_split_growth": 1.4,  # touching colonies both below this growth are split, not fused
+    "rescue_division_at_contact": True,
+    "contact_division_growth": 1.7,  # stronger growth evidence for a single pre-contact candidate
+    "contact_max_area_step": 1.3,  # reject an arriving neighbour counted as a daughter
     "doublet_solidity": 0.89,  # founders less convex than this at baseline are flagged
     "drift_radius_px": 30,
 }
@@ -109,6 +112,7 @@ class ColonyEvents:
             solidity = _solidity(labels[box] == label)
             self.founders[label] = {
                 "id": founder["id"],
+                "eligible": not bool(founder.get("excluded_reason")),
                 "area0": node["area_px"],
                 "solidity0": solidity,
                 "counts": [1],
@@ -253,6 +257,36 @@ class ColonyEvents:
             ))
         return out
 
+    def _contact_candidate(self, f, cells):
+        """A censored pre-contact split/kink, never evidence from the merged blob.
+
+        Require growth in two consecutive pre-contact observations. Artificial
+        footprint partitions and baseline doublets cannot supply this evidence.
+        This is weaker than temporal confirmation, so finish() flags the call
+        and widens its interval through the first inseparable frame.
+        """
+        if (not self.p["rescue_division_at_contact"] or not f["eligible"]
+                or f["stop"] is None or f["stop"][1] != "fused"
+                or f["contact"] is not None or f["gap"]
+                or f["solidity0"] < self.p["doublet_solidity"] or len(cells) < 3):
+            return None
+        t = len(cells) - 1
+        if (self.frames[t] + 1 != f["stop"][0]
+                or self.frames[t - 1] + 1 != self.frames[t]
+                or cells[t] < 2 or cells[t - 1] != 1
+                or f["areas"][t - 1] < self.p["min_colony_growth"] * f["area0"]
+                or f["areas"][t] < self.p["contact_division_growth"] * f["area0"]
+                or f["areas"][t] < 0.8 * f["areas"][t - 1]
+                or f["areas"][t] > self.p["contact_max_area_step"] * f["areas"][t - 1]):
+            return None
+        shapes = f["shapes"][t]
+        if len(shapes) > 1:
+            # A sliver beside a large parent is not credible daughter evidence.
+            areas = sorted((a for a, _ in shapes), reverse=True)
+            if len(areas) != 2 or areas[1] < 0.25 * sum(areas):
+                return None
+        return t
+
     def finish(self, recording_last_frame):
         p = self.p
         need, window = p["persist"]
@@ -285,6 +319,11 @@ class ColonyEvents:
                 decision, reason = "division", "division"
                 lower, upper = before(division), frames[division]
                 end = frames[division]
+            elif (candidate := self._contact_candidate(f, cells)) is not None:
+                decision, reason = "division", "division_at_contact"
+                lower, upper = before(candidate), stop_frame
+                end = f["last_seen"]
+                flags.append("division_at_contact")
             elif unconfirmed is not None:
                 decision, reason = "lost", "unconfirmed_division_candidate"
                 lower, upper = before(unconfirmed), frames[unconfirmed]
