@@ -2,9 +2,9 @@
 
 ## Prerequisites & Architecture Overview
 
-The lab PC has a 10-core/20-thread Intel Core i9-9900X, 128 GB RAM, and one NVIDIA RTX 2080 Ti with 11 GB VRAM. You need a lab administrator, your own T3 and GitHub accounts, and your own login for at least one AI provider. The PC must stay powered on and awake for remote access. Ask the repository maintainer for a published revision containing the integrated v2.2 pipeline, GPU lock and Position Viewer v2.
+The lab PC has a 10-core/20-thread Intel Core i9-9900X, 128 GB RAM, and one NVIDIA RTX 2080 Ti with 11 GB VRAM. You need a lab administrator, your own T3 and GitHub accounts, and your own login for at least one AI provider. The PC must stay powered on and awake for remote access. The `main` branch of `lab-data-analysis` includes the integrated v2.2 pipeline, cross-process GPU lock, and Position Viewer v2.
 
-The owner keeps the Windows account `t3`, Scheduled Task `T3 Code Server`, and `C:\T3\run-t3.ps1` as configured. Each additional lab member gets a **Standard Windows account** (`t3-<name>`), a separate password-backed Scheduled Task and loopback port, and a T3 Connect tunnel paired to their own T3 account. Windows keeps the profiles, credentials and workspaces separate. The outbound Connect tunnel reaches the member's T3 server without opening its port to the LAN. T3, GitHub and provider sign-ins are separate. [T3 Connect setup](https://github.com/pingdotgg/t3code/blob/main/docs/user/remote-access.md)
+The owner keeps the Windows account `t3`, Scheduled Task `T3 Code Server`, and `C:\T3\run-t3.ps1` as configured. Each additional lab member gets a **Standard Windows account** (`t3-<name>`), a separate password-backed Scheduled Task and loopback port, and a T3 Connect tunnel paired to their own T3 account. Windows keeps the profiles, credentials and workspaces separate. The outbound Connect tunnel reaches the member's T3 server without opening its port to the LAN. T3, GitHub and provider sign-ins are separate. If `C:` is tight on disk space, set `$env:T3CODE_HOME` (or pass `--base-dir`) inside the user's startup script and pairing command so `.t3` runtime state (~2–3 GB per user) lives on the data SSD instead of `C:\Users\t3-<name>\.t3`. [T3 Connect setup](https://github.com/pingdotgg/t3code/blob/main/docs/user/remote-access.md)
 
 | Resource | Where it lives |
 | --- | --- |
@@ -136,7 +136,7 @@ The owner keeps the Windows account `t3`, Scheduled Task `T3 Code Server`, and `
    t3.cmd --version
    ```
 
-2. Pair with your own T3 account using the assigned port. `t3 up` can create its own per-user service during pairing. After pairing, use the lab's password-backed task as the sole launcher for your profile.
+2. Pair with your own T3 account using the assigned port. Using `t3.cmd connect link --headless` authorizes T3 Connect cleanly without installing a competing background service (the lab's password-backed Scheduled Task stays the sole launcher). Alternatively, `t3.cmd up --connect --no-lan` also works; if `t3.cmd service status` shows `up` installed a per-user service, run `t3.cmd service uninstall` before starting the Scheduled Task.
 
    ```powershell
    $env:T3CODE_PORT = "$t3Port"
@@ -147,11 +147,11 @@ The owner keeps the Windows account `t3`, Scheduled Task `T3 Code Server`, and `
    if (Test-Path -LiteralPath $serviceEnv) { throw 'Existing T3 configuration. Ask the administrator to check this profile.' }
    @("T3CODE_PORT=$t3Port", 'T3CODE_HOST=127.0.0.1') |
        Set-Content -LiteralPath $serviceEnv -Encoding Ascii
-   t3.cmd up --connect --no-lan
+   t3.cmd connect link --headless
    t3.cmd status
    ```
 
-   Finish the browser sign-in and check that your environment is paired. If `t3.cmd service status` shows that `up` installed a service for **your** account, run `t3.cmd service uninstall` from that same profile before the handoff. This preserves the T3 data and Connect pairing. Ask the administrator to run the following in the admin session from Part 1.
+   Finish the browser sign-in on any device (e.g., your laptop) using the URL and code printed by `t3.cmd connect link --headless`, then ask the administrator to start your Scheduled Task from Part 1:
 
    ```powershell
    Start-ScheduledTask -TaskName $task
