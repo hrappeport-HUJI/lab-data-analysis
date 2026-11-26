@@ -6,7 +6,7 @@ Code for analyses that repeat across experiments. It holds code only.
 |---|---|
 | Code | This repo, cloned to `~/Research/lab-data-analysis` |
 | Data: raw files, plate maps, notebooks and results of each experiment | `~/PycharmProjects/ScriptHub/ReaderPlot/YYYY_MM_DD_name/`, backed up on Google Drive |
-| How to run an analysis, and what to ask first | Skills in the Zettelkasten: `Library/Skills/` |
+| How to run an analysis, and what to ask first | [Microscopy skill](skills/microscopy-experiment/SKILL.md) in this repo and plate-reader/ScanLag skills in the Zettelkasten's `Library/Skills/` where available |
 | What an experiment was and what it showed | Experiment notes in the Zettelkasten: `Library/LabNotebook/Experiments/` |
 
 `.gitignore` keeps common data formats out of this repo. Don't add data, results or figures here.
@@ -72,6 +72,8 @@ Move code into a shared folder only when a second analysis actually needs it.
 ## Founder microscopy
 
 `microscopy/` is an installable Python package with a local browser review viewer. It supports 2D TIFF time series, replaceable segmentation/tracking adapters, founder splitting and outline/link edits, first-division/loss calls, focus exclusions, fluorescence measurements, and reproducible plots from versioned reviews.
+
+The v2.2 founder workflow combines `lab-microscopy mm-metadata`, the `founder_v2` tracker, and the FP32 stop-on-event `microscopy.fast_omnipose` GPU runner. Use Position Viewer v2 (`python -m microscopy.position_viewer`) for field inspection, Review Workbench for corrections, and `microscopy.founder_plots` for figures from reviewed results. The [shared Windows PC onboarding guide](docs/multi_user_onboarding.md) covers individual T3 Code accounts, shared Python and GPU resources, and a first pilot.
 
 ```sh
 python -m pip install -e '.[test]'

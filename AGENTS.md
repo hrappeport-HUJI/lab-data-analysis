@@ -2,13 +2,20 @@
 
 This repo holds code for repeating lab analyses, and no data. `README.md` describes it.
 
-The instructions for running an analysis are skills in the Zettelkasten, at `~/Research/Zettelkasten/Library/Skills/`. For a plate-reader run, read `Library/Skills/reader-experiment/SKILL.md` there and follow it. For a ScanLag run, read `Library/Skills/scanlag-experiment/SKILL.md`.
+If `~/Research/Zettelkasten/Library/Skills/` exists on this machine, follow `reader-experiment/SKILL.md` there for plate-reader runs and `scanlag-experiment/SKILL.md` for ScanLag runs. Otherwise use the repository documentation and ask for any missing experiment-specific instructions.
 
 Run `python -m pytest plate_reader/tests` (and `cd scanlag_analyser && python -m pytest tests` for ScanLag) after changing code. Commit only when asked.
 
 ## Microscopy
 
-For microscopy use the repo-contained `skills/microscopy-experiment/SKILL.md` and `docs/microscopy/`. This is an explicit exception to the older external-skills convention. Keep acquisition data, generated projects and review databases outside this code repository. Preserve original algorithm runs and save corrections through the review API. Run `python -m pytest microscopy/tests plate_reader/tests` after microscopy code changes.
+For microscopy use the repo-contained `skills/microscopy-experiment/SKILL.md` and `docs/microscopy/`. For v2.2, use `lab-microscopy mm-metadata` for Micro-Manager metadata, pilot `founder_v2` and `microscopy.fast_omnipose`, inspect fields with `python -m microscopy.position_viewer`, and generate requested figures from a frozen result with `microscopy.founder_plots`. Keep acquisition data, generated projects and review databases outside this code repository. Preserve original algorithm runs and save corrections through the review API. Run `python -m pytest microscopy/tests plate_reader/tests` after microscopy code changes. See `docs/multi_user_onboarding.md` for shared-PC setup.
+
+## Shared Multi-User Lab PC
+
+- Use your own clone and write outputs, caches and logs inside your assigned user workspace. Treat raw acquisitions as read-only.
+- Reuse `E:\microscopy\env-gpu`, `E:\microscopy\env` and `E:\microscopy\models` read-only. Put your clone on `PYTHONPATH` and use the shared interpreters directly. Use the preinstalled PyTorch and CUDA stack.
+- Leave other users' processes, viewers and files alone. Bind viewers to loopback by default and use your assigned viewer ports or `--port 0` where supported.
+- Let the automatic GPU lock queue jobs on the shared GPU. Keep the lock enabled and use the same lock path across accounts. Check free disk and available RAM before large jobs.
 
 ## Long-running jobs (any agent)
 
