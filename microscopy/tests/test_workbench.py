@@ -299,3 +299,28 @@ def test_bound_to_one_address_links_use_that_address(project, tmp_path):
         assert all(link.startswith(f"http://{address}:") for link in server.links())
     finally:
         server.server_close()
+
+
+def test_jpeg_display_images_are_smaller_and_typed(project):
+    png_model = RunReviewModel(project.root, read_only=True)
+    jpg_model = RunReviewModel(project.root, read_only=True, image_format="jpeg")
+    record = png_model.all_effective()[0]
+    png, _ = png_model.render(record, 1, mode="overlay")
+    jpg, meta = jpg_model.render(record, 1, mode="overlay")
+    assert jpg[:2] == b"\xff\xd8" and png[:4] == b"\x89PNG" and meta["frame"] == 1
+    with pytest.raises(ValueError):
+        RunReviewModel(project.root, read_only=True, image_format="gif")
+
+
+def test_static_files_have_browser_content_types(project):
+    # Windows' registry can map .js to text/plain; browsers then refuse to run the viewer's scripts.
+    server = WorkbenchServer(project.root, 0, read_only=True)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        for path, expected in [("/", "text/html"), ("/viewer.js", "text/javascript"),
+                               ("/manual_ui.js", "text/javascript"), ("/style.css", "text/css")]:
+            response = urllib.request.urlopen(server.origin + path, timeout=10)
+            assert response.headers["Content-Type"].split(";")[0] == expected, path
+    finally:
+        server.shutdown()
+        server.server_close()

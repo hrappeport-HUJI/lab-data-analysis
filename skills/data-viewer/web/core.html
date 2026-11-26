@@ -1,0 +1,661 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--AGENT_GUIDE-->
+<title>Data Viewer</title>
+<style>
+/* Layout: control rail left; plot, module cards and statistics on the right. Everything is driven by the data bundle (spec + columns). */
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2430; --muted: #5d6675; --line: #dde1e7; --accent: #1f5f8b;
+  --chip: #eef1f5; --warn: #9a5b00; --you: #e8f0f7;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12161c; --panel: #1a2029; --ink: #e3e7ee; --muted: #9aa3b2; --line: #2c3440; --accent: #7cb7e0;
+  --chip: #232b36; --warn: #e0a54a; --you: #1f2a36; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12161c; --panel: #1a2029; --ink: #e3e7ee; --muted: #9aa3b2; --line: #2c3440; --accent: #7cb7e0;
+  --chip: #232b36; --warn: #e0a54a; --you: #1f2a36; color-scheme: dark }
+*, *::before, *::after { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 14px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 16px 32px; }
+h1 { font-size: 20px; font-weight: 600; margin: 0; text-wrap: balance; }
+h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+.sub { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: end; gap: 12px; margin-bottom: 14px; }
+.wrap { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 880px) { .wrap { grid-template-columns: minmax(0, 1fr); } }
+.rail, .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+.rail { padding: 14px; display: grid; gap: 16px; }
+.card { padding: 12px; min-width: 0; }
+.stack { display: grid; gap: 16px; min-width: 0; }
+fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 7px; min-width: 0; }
+legend { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-bottom: 4px; padding: 0; }
+label { display: flex; align-items: center; gap: 7px; font-size: 13px; }
+select, input[type=number], input[type=text], textarea { font: inherit; font-size: 13px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 4px 6px; min-width: 0; }
+select { width: 100%; }
+input[type=number] { width: 100%; font-family: var(--mono); font-size: 12.5px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.row3 { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); }
+.axis { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.seg button { border: 0; border-right: 1px solid var(--line); background: transparent; color: var(--ink); font: inherit; font-size: 12px; padding: 4px 9px; cursor: pointer; }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed=true] { background: var(--accent); color: var(--panel); }
+button.btn { font: inherit; font-size: 12.5px; border: 1px solid var(--line); background: var(--chip); color: var(--ink); border-radius: 5px; padding: 5px 10px; cursor: pointer; }
+button.btn:hover { border-color: var(--accent); }
+button.btn:disabled { opacity: .5; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.views { display: flex; flex-wrap: wrap; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; flex: none; display: inline-block; }
+.fgroup { display: grid; gap: 4px; }
+.frow { display: grid; grid-template-columns: auto auto 1fr auto; gap: 7px; align-items: center; font-size: 13px; }
+.fhead { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); }
+.fhead button { border: 0; background: none; color: var(--accent); font: inherit; font-size: 11.5px; cursor: pointer; padding: 0; }
+.count { font-family: var(--mono); font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+#plot { width: 100%; height: 660px; }
+@media (max-width: 600px) { #plot { height: 520px; } }
+.sub-l { display: block; font-size: 11.5px; color: var(--muted); margin: 6px 0 2px; }
+.hint { font-size: 12px; color: var(--muted); line-height: 1.45; margin: 4px 0 0; }
+.note { font-size: 12px; color: var(--warn); min-height: 1em; margin-top: 4px; }
+.pick { border-top: 1px solid var(--line, #ddd); margin-top: 8px; padding-top: 8px; font-size: 13px; }
+.pick-head { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 6px; }
+.pick-head b { margin-right: auto; }
+.pick dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 2px 14px; margin: 0; }
+.pick dt { color: var(--muted); font-size: 11px; }
+.pick dd { margin: 0 0 4px; font-variant-numeric: tabular-nums; }
+.tables { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 1100px) { .tables { grid-template-columns: minmax(0, 1fr); } }
+.tw { overflow-x: auto; }
+table { border-collapse: collapse; font-size: 12.5px; width: 100%; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 500; color: var(--muted); font-size: 11.5px; border-bottom: 1px solid var(--line); padding: 4px 8px 4px 0; white-space: nowrap; }
+td { padding: 4px 8px 4px 0; border-bottom: 1px solid var(--line); white-space: nowrap; font-family: var(--mono); font-size: 12px; }
+td.name { font-family: var(--sans); font-size: 12.5px; }
+.sig { color: var(--accent); font-weight: 600; }
+.excl-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; background: var(--chip); border: 1px solid var(--line); border-radius: 999px; padding: 2px 4px 2px 9px; font-size: 12px; }
+.chip button { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; padding: 0 5px; }
+.foot { font-size: 12px; color: var(--muted); line-height: 1.5; max-width: 110ch; white-space: pre-wrap; margin: 0; }
+/*MODULE_CSS*/
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1 id="title">Data viewer</h1>
+    <div class="sub" id="subtitle"></div>
+  </div>
+  <div class="views" id="views" role="group" aria-label="Preset views"></div>
+</header>
+
+<div class="wrap">
+  <aside class="rail">
+    <fieldset id="filters"><legend>Show</legend></fieldset>
+    <fieldset><legend>Groups</legend>
+      <label class="sub-l" for="colorby">Colour by</label><select id="colorby" aria-label="Colour by"></select>
+      <label class="sub-l" for="splitby">Then split by</label><select id="splitby" aria-label="Then split by"></select>
+      <div class="seg" id="splitstyle" role="group" aria-label="How the split groups differ">
+        <button type="button" data-split="shade" aria-pressed="true">Shade</button>
+        <button type="button" data-split="style" aria-pressed="false">Style</button>
+        <button type="button" data-split="color" aria-pressed="false">Own colour</button>
+      </div>
+      <p class="hint" id="splithint">Split each colour group by a second category: shades of the colour, marker / line / bar styles, or a colour per combined group.</p>
+    </fieldset>
+    <fieldset><legend>Axes</legend>
+      <div class="axis" id="axis-x"></div>
+      <div class="axis" id="axis-y"></div>
+      <button class="btn" id="swap" type="button">Swap X and Y</button>
+    </fieldset>
+    <fieldset><legend>Points</legend>
+      <label><input type="checkbox" id="outliers" checked> Remove far outliers</label>
+      <div class="row3"><span>fence</span><input type="number" id="fence" value="3" step="0.5" min="0.5" aria-label="Outlier fence in IQR"><span>× IQR</span></div>
+      <label><input type="checkbox" id="band"> Show rows with no Y value in a band</label>
+      <label><input type="checkbox" id="limfilter"> Statistics use only points inside the limits</label>
+      <label><input type="checkbox" id="showexcl" checked> Show removed points as grey crosses</label>
+      <label><input type="checkbox" id="trend" checked> Trend lines (linear axes)</label>
+      <p class="hint">Click a point to see all its values (it is ringed); you can remove it from the plot and the statistics there.</p>
+    </fieldset>
+    <fieldset><legend>Histograms</legend>
+      <div class="seg" role="group" aria-label="Histogram layout">
+        <button type="button" data-hist="lanes" aria-pressed="true">Lane per group</button>
+        <button type="button" data-hist="overlay" aria-pressed="false">Overlaid</button>
+      </div>
+      <div class="row3"><span>bins</span><input type="number" id="bins" value="22" min="5" max="80" aria-label="Number of bins"><span></span></div>
+    </fieldset>
+    <fieldset><legend>My views</legend>
+      <div class="row2"><button class="btn" id="saveview" type="button">Save this view</button><button class="btn" id="copyview" type="button">Copy as text</button></div>
+      <div class="views" id="myviews"></div>
+    </fieldset>
+  </aside>
+
+  <main class="stack">
+    <div class="card">
+      <div id="plot"></div>
+      <p class="hint">Histograms: fraction of each group, same scale in every lane; solid line = median, dotted = mean. Drag to zoom (sets the limits), double-click to reset, the camera icon saves an SVG.</p>
+      <div class="note" id="note"></div>
+      <div class="pick" id="pick" hidden></div>
+    </div>
+
+<!--SLOT:cards-->
+
+    <div class="tables">
+      <div class="card"><h2>Within each group</h2><div class="tw"><table id="t-within"></table></div></div>
+      <div class="card"><h2>Between groups</h2><div class="tw"><table id="t-between"></table></div></div>
+    </div>
+    <div class="card">
+      <h2>Removed points <span class="count" id="excl-count"></span></h2>
+      <div class="excl-list" id="excl-list"></div>
+      <div style="margin-top:8px"><button class="btn" id="restore" type="button">Put all back</button></div>
+    </div>
+    <p class="foot" id="notes"></p>
+    <p class="foot">Statistics. Within groups: Spearman ρ, two-sided permutation p (5,000 shuffles), Holm-corrected across the groups shown. Between groups: two-sided Mann-Whitney per pair (normal approximation with tie correction), Holm-corrected within each variable; Kruskal-Wallis across 3+ groups. Far outliers: per group, beyond the fence × IQR from the quartiles; log-scaled columns are judged on asinh(v / c). Symmetric log axes show zero and negative values; the region within ±c of zero is linear.</p>
+  </main>
+</div>
+
+<!--PLOTLY-->
+<!--DATA-->
+<script>
+const B = window.VIEWER_BUNDLE || JSON.parse(document.getElementById("viewer-data")?.textContent || "null");
+if (!B || !window.Plotly) { document.body.innerHTML = `<p style="padding:24px;font:15px system-ui">${!B
+  ? "The data for this viewer did not load. If it came as a folder, keep the <b>.data.js</b> file next to this page."
+  : "The plotting library (Plotly) did not load. This page needs an internet connection the first time, or a copy built with Plotly inside."}</p>`; throw new Error("viewer: missing data or Plotly"); }
+const S = B.spec, COLS = S.columns, N = B.n;
+const NUM = Object.keys(COLS).filter(k => (COLS[k].kind || "number") === "number");
+const CAT = Object.keys(COLS).filter(k => COLS[k].kind === "category");
+const PALETTE = ["#1f6fd1", "#e07b00", "#2a9d3c", "#d52828", "#8a3ffc", "#00939f", "#6d4c41", "#c2185b", "#7a8a00", "#5c6bc0"];
+const SYMBOLS = ["circle", "triangle-up", "square", "diamond", "triangle-down", "pentagon", "cross", "star"];
+const ROWS = Array.from({ length: N }, (_, i) => { const r = { i, id: B.ids[i] }; for (const k in B.data) r[k] = B.data[k][i]; return r; });
+const label = r => (S.label || "row {id}").replace(/\{(\w+)\}/g, (_, k) => r[k] ?? "");
+const colorOf = (col, v) => (COLS[col].colors || {})[v] || PALETTE[(COLS[col].order || []).indexOf(v) % PALETTE.length] || "#888";
+const DASHES = ["solid", "dash", "dot", "dashdot", "longdash", "longdashdot"];
+const PATTERNS = ["", "/", ".", "x", "\\", "+"];
+const SEP = " · ";
+const L = k => COLS[k]?.label || k;
+const short = k => (COLS[k]?.short || L(k).split(" (")[0]);
+const STORE = "viewer:" + (S.title || "data");
+
+// ---------------------------------------------------------------- modules (optional features; see SKILL.md)
+const MODULES = [];
+function viewerModule(name, m) { MODULES.push({ name, cfg: (S.features || {})[name] || {}, ...m }); }
+function hook(h, ...args) { for (const m of MODULES) if (m[h]) try { m[h](m.cfg, ...args); } catch (e) { console.error(`module ${m.name}:`, e); } }
+
+// ---------------------------------------------------------------- state
+const first = (S.views || [])[0] || {};
+const state = { x: first.x || NUM[0], y: first.y || NUM[1] || NUM[0], scale: { x: "linear", y: "linear" }, lim: { x: [null, null], y: [null, null] },
+  colorBy: first.color_by || S.color_by || CAT[0], splitBy: S.split_by || "", splitStyle: S.split_style || "shade", filters: {}, outliers: true, fence: 3, band: false, limfilter: false, showexcl: true, trend: true,
+  hist: "lanes", bins: 22, excluded: new Set() };
+(S.filters || []).forEach(c => state.filters[c] = new Set(COLS[c].order));
+try { JSON.parse(localStorage.getItem(STORE + ":excluded") || "[]").forEach(k => state.excluded.add(k)); } catch (e) {}
+const saveExcluded = () => { try { localStorage.setItem(STORE + ":excluded", JSON.stringify([...state.excluded])); } catch (e) {} };
+
+function applyView(v) {
+  if (v.x && COLS[v.x]) { state.x = v.x; state.scale.x = v.x_scale || COLS[v.x].scale || "linear"; state.lim.x = v.x_limits ? [...v.x_limits] : [null, null]; }
+  if (v.y && COLS[v.y]) { state.y = v.y; state.scale.y = v.y_scale || COLS[v.y].scale || "linear"; state.lim.y = v.y_limits ? [...v.y_limits] : [null, null]; }
+  if (v.color_by && COLS[v.color_by]) state.colorBy = v.color_by;
+  if (v.split_by !== undefined) state.splitBy = v.split_by && COLS[v.split_by] && COLS[v.split_by].kind === "category" ? v.split_by : "";
+  if (["shade", "style", "color"].includes(v.split_style)) state.splitStyle = v.split_style;
+  if (state.splitBy === state.colorBy) state.splitBy = "";
+  if (v.filters) for (const [c, vals] of Object.entries(v.filters)) if (state.filters[c]) state.filters[c] = new Set(vals.filter(x => COLS[c].order.includes(x)));
+  for (const k of ["outliers", "band", "limfilter", "showexcl", "trend", "hist", "bins", "fence"]) if (v[k] !== undefined) state[k] = v[k];
+}
+function viewOf() {
+  return { x: state.x, y: state.y, x_scale: state.scale.x, y_scale: state.scale.y,
+    x_limits: state.lim.x.some(v => v != null) ? state.lim.x : undefined, y_limits: state.lim.y.some(v => v != null) ? state.lim.y : undefined,
+    color_by: state.colorBy, split_by: state.splitBy || null, split_style: state.splitStyle, filters: Object.fromEntries(Object.entries(state.filters).map(([c, s]) => [c, [...s]])),
+    outliers: state.outliers, band: state.band, hist: state.hist };
+}
+applyView(first);
+
+// ---------------------------------------------------------------- maths
+function rank(a) {
+  const idx = a.map((v, i) => [v, i]).sort((p, q) => p[0] - q[0]), r = new Array(a.length); let ties = 0;
+  for (let i = 0; i < idx.length;) { let j = i; while (j + 1 < idx.length && idx[j + 1][0] === idx[i][0]) j++;
+    const avg = (i + j) / 2 + 1; for (let k = i; k <= j; k++) r[idx[k][1]] = avg; const t = j - i + 1; ties += t * t * t - t; i = j + 1; }
+  r.ties = ties; return r;
+}
+function pearson(a, b) { const n = a.length; let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n;
+  let sab = 0, saa = 0, sbb = 0; for (let i = 0; i < n; i++) { const da = a[i] - ma, db = b[i] - mb; sab += da * db; saa += da * da; sbb += db * db; }
+  return saa && sbb ? sab / Math.sqrt(saa * sbb) : NaN; }
+function mulberry(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const hashSeed = s => [...s].reduce((a, ch) => (a * 31 + ch.charCodeAt(0)) | 0, 7);
+function spearman(x, y, seed, perms = 5000) {
+  if (x.length < 4) return { rho: NaN, p: NaN };
+  const rx = rank(x), ry = rank(y), rho = pearson(rx, ry); if (!isFinite(rho)) return { rho, p: NaN };
+  const rnd = mulberry(seed), perm = ry.slice(); let c = 0;
+  for (let k = 0; k < perms; k++) { for (let i = perm.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = perm[i]; perm[i] = perm[j]; perm[j] = t; }
+    if (Math.abs(pearson(rx, perm)) >= Math.abs(rho) - 1e-12) c++; }
+  return { rho, p: (c + 1) / (perms + 1) };
+}
+function erfc(x) { const z = Math.abs(x), t = 1 / (1 + 0.5 * z);
+  const r = t * Math.exp(-z * z - 1.26551223 + t * (1.00002368 + t * (0.37409196 + t * (0.09678418 + t * (-0.18628806 + t * (0.27886807 + t * (-1.13520398 + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))));
+  return x >= 0 ? r : 2 - r; }
+function mannWhitney(a, b) { const n1 = a.length, n2 = b.length; if (n1 < 3 || n2 < 3) return NaN;
+  const r = rank(a.concat(b)), n = n1 + n2; let r1 = 0; for (let i = 0; i < n1; i++) r1 += r[i];
+  const u = r1 - n1 * (n1 + 1) / 2, mu = n1 * n2 / 2, sd = Math.sqrt(n1 * n2 / 12 * ((n + 1) - r.ties / (n * (n - 1))));
+  if (!sd) return 1; return Math.min(1, erfc(Math.max(Math.abs(u - mu) - 0.5, 0) / sd / Math.SQRT2)); }
+function lnGamma(z) { const g = [76.18009172947146, -86.50532032941677, 24.01409824083091, -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
+  let x = z, y = z, t = x + 5.5; t -= (x + 0.5) * Math.log(t); let s = 1.000000000190015; for (const c of g) s += c / ++y; return -t + Math.log(2.5066282746310005 * s / x); }
+function gammaQ(a, x) { if (x <= 0) return 1;
+  if (x < a + 1) { let ap = a, sum = 1 / a, del = sum; for (let n = 0; n < 500; n++) { ap++; del *= x / ap; sum += del; if (Math.abs(del) < Math.abs(sum) * 1e-14) break; }
+    return 1 - sum * Math.exp(-x + a * Math.log(x) - lnGamma(a)); }
+  let b = x + 1 - a, c = 1e300, d = 1 / b, h = d;
+  for (let i = 1; i < 500; i++) { const an = -i * (i - a); b += 2; d = an * d + b; if (Math.abs(d) < 1e-300) d = 1e-300; c = b + an / c; if (Math.abs(c) < 1e-300) c = 1e-300;
+    d = 1 / d; const del = d * c; h *= del; if (Math.abs(del - 1) < 1e-14) break; }
+  return Math.exp(-x + a * Math.log(x) - lnGamma(a)) * h; }
+function kruskal(groups) { groups = groups.filter(g => g.length >= 3); if (groups.length < 3) return NaN;
+  const all = groups.flat(), n = all.length, r = rank(all); let H = 0, o = 0;
+  for (const g of groups) { let s = 0; for (let i = 0; i < g.length; i++) s += r[o + i]; o += g.length; H += s * s / g.length; }
+  H = 12 / (n * (n + 1)) * H - 3 * (n + 1); const corr = 1 - r.ties / (n * n * n - n); if (corr > 0) H /= corr; return gammaQ((groups.length - 1) / 2, H / 2); }
+function holm(ps) { const order = ps.map((p, i) => [p, i]).filter(q => isFinite(q[0])).sort((a, b) => a[0] - b[0]);
+  const out = ps.map(() => NaN); let prev = 0; order.forEach(([p, i], k) => { prev = Math.max(prev, Math.min(1, p * (order.length - k))); out[i] = prev; }); return out; }
+function theilSen(x, y) { const n = x.length; if (n < 3) return null; const sl = [];
+  const step = Math.max(1, Math.floor(n * (n - 1) / 2 / 40000));
+  let c = 0; for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) { if (c++ % step) continue; if (x[j] !== x[i]) sl.push((y[j] - y[i]) / (x[j] - x[i])); }
+  if (!sl.length) return null; const m = median(sl); return { slope: m, intercept: median(y.map((v, i) => v - m * x[i])) }; }
+const quantile = (s, q) => { const a = s.slice().sort((x, y) => x - y), p = (a.length - 1) * q, lo = Math.floor(p); return a[lo] + (a[Math.min(lo + 1, a.length - 1)] - a[lo]) * (p - lo); };
+const median = a => a.length ? quantile(a, .5) : NaN, mean = a => a.length ? a.reduce((s, v) => s + v, 0) / a.length : NaN;
+const sd = a => { if (a.length < 2) return NaN; const m = mean(a); return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / (a.length - 1)); };
+
+// ---------------------------------------------------------------- axes
+const zone = k => COLS[k]?.zone ?? 1;
+function tf(axis) {
+  const v = state[axis], c = zone(v);
+  if (state.scale[axis] !== "log") return { f: x => x, inv: x => x, ticks: null };
+  const f = x => Math.asinh(x / (2 * c)) / Math.LN10;
+  return { f, inv: t => 2 * c * Math.sinh(t * Math.LN10),
+    ticks: (lo, hi) => {
+      // Decades when the range spans several; 1-2-5 steps when it spans fewer; plain even ticks when even those miss.
+      const vals = [0]; for (let k = -9; k <= 9; k++) for (const m of [1, 2, 5]) { const d = m * Math.pow(10, k); if (d >= c * .99) vals.push(d, -d); }
+      const within = v => { const t = f(v); return t >= lo && t <= hi; };
+      let inside = vals.filter(within).sort((a, b) => a - b);
+      const decades = inside.filter(v => v === 0 || Math.abs(Math.log10(Math.abs(v)) % 1) < 1e-9);
+      if (decades.filter(v => v !== 0).length >= 3) inside = decades;
+      if (inside.length < 3) inside = niceTicks(2 * c * Math.sinh(lo * Math.LN10), 2 * c * Math.sinh(hi * Math.LN10)).filter(within);
+      return { tickvals: inside.map(f), ticktext: inside.map(fmtTick) }; } };
+}
+const sup = e => String(e).split("").map(ch => "⁰¹²³⁴⁵⁶⁷⁸⁹"["0123456789".indexOf(ch)] ?? (ch === "-" ? "⁻" : ch)).join("");
+function fmtTick(v) { if (v === 0) return "0"; const a = Math.abs(v);
+  let s; if (a >= .01 && a < 1e4) s = String(+a.toPrecision(3));
+  else { const e = Math.floor(Math.log10(a) + 1e-9), m = +(a / Math.pow(10, e)).toPrecision(2); s = (m === 1 ? "" : m + "×") + `10${sup(e)}`; }
+  return (v < 0 ? "−" : "") + s; }
+const fmt = v => v == null || !isFinite(v) ? "–" : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : Math.abs(v) >= 1 ? v.toFixed(2) : v.toPrecision(2);
+const fmtP = p => !isFinite(p) ? "–" : p < 1e-300 ? "<1e-300" : p < 1e-4 ? p.toExponential(0) : p < 0.01 ? p.toPrecision(1) : p.toFixed(p < 0.1 ? 3 : 2);
+const stars = p => !isFinite(p) ? "" : p < .001 ? "***" : p < .01 ? "**" : p < .05 ? "*" : "";
+const ok = v => v != null && isFinite(v);
+
+// ---------------------------------------------------------------- selection
+const passFilters = (r, filters = state.filters) => Object.entries(filters).every(([c, s]) => s.has(r[c]));
+// A group is a value of "Colour by", or a (colour value, split value) pair when "Then split by" is set.
+const GMETA = new Map();
+const shownVals = c => COLS[c].order.filter(v => !state.filters[c] || state.filters[c].has(v));
+const groupKey = r => state.splitBy ? `${r[state.colorBy]}${SEP}${r[state.splitBy]}` : r[state.colorBy];
+function groupsShown() {
+  GMETA.clear(); const a = shownVals(state.colorBy);
+  if (!state.splitBy) { a.forEach((v, i) => GMETA.set(v, { a: v, ai: i, b: null, bi: 0, nb: 1, k: i, n: a.length })); return a; }
+  const b = shownVals(state.splitBy), present = new Set(ROWS.filter(r => passFilters(r)).map(groupKey)), out = [];
+  a.forEach((x, ai) => b.forEach((y, bi) => { const k = `${x}${SEP}${y}`; if (present.has(k)) { out.push(k); GMETA.set(k, { a: x, ai, b: y, bi, nb: b.length }); } }));
+  out.forEach((k, i) => Object.assign(GMETA.get(k), { k: i, n: out.length })); return out;
+}
+// Colour, marker, line dash and bar pattern of a group (keys from groupsShown, or any row through groupKey).
+function mix(hex, t) { const n = parseInt(hex.slice(1), 16), c = [n >> 16, n >> 8 & 255, n & 255].map(v => Math.round(t >= 0 ? v + (255 - v) * t : v * (1 + t)));
+  return "#" + c.map(v => v.toString(16).padStart(2, "0")).join(""); }
+function styleOf(g, row) {
+  const m = GMETA.get(g) || (row ? { a: row[state.colorBy], ai: COLS[state.colorBy].order.indexOf(row[state.colorBy]), b: state.splitBy ? row[state.splitBy] : null,
+    bi: state.splitBy ? COLS[state.splitBy].order.indexOf(row[state.splitBy]) : 0, nb: state.splitBy ? COLS[state.splitBy].order.length : 1, k: 0 } : { a: g, ai: 0, b: null, bi: 0, nb: 1, k: 0 });
+  const base = colorOf(state.colorBy, m.a);
+  if (!state.splitBy) return { color: base, symbol: SYMBOLS[m.k % SYMBOLS.length], dash: "solid", pattern: "" };
+  if (state.splitStyle === "color") return { color: PALETTE[m.k % PALETTE.length], symbol: SYMBOLS[m.ai % SYMBOLS.length], dash: "solid", pattern: "" };
+  if (state.splitStyle === "style") return { color: base, symbol: SYMBOLS[m.bi % SYMBOLS.length], dash: DASHES[m.bi % DASHES.length], pattern: PATTERNS[m.bi % PATTERNS.length] };
+  // shade: the colour itself, then steps towards the background's opposite (lighter on a dark page, darker on a light one)
+  const f = m.nb > 1 ? m.bi / (m.nb - 1) : 0, t = darkPage() ? 0.55 * f : -0.5 * f;
+  return { color: mix(base, t), symbol: SYMBOLS[m.ai % SYMBOLS.length], dash: "solid", pattern: "" };
+}
+const cut = (t, n) => (t = String(t), t.length > n ? t.slice(0, n - 1) + "…" : t);
+const laneLabel = g => { const m = GMETA.get(g); return m && m.b != null ? `${cut(m.a, 8)}<br>${cut(m.b, 8)}` : cut(g, 8); };
+function darkPage() { const c = (getComputedStyle(document.body).backgroundColor.match(/\d+/g) || [255, 255, 255]).map(Number);
+  return (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) < 128; }
+const groupTitle = () => state.splitBy ? `${L(state.colorBy)} × ${L(state.splitBy)}` : L(state.colorBy);
+function outlierSet(rows) {
+  const out = new Set(); if (!state.outliers) return out;
+  for (const v of [state.x, state.y]) {
+    if (COLS[v].never_outlier) continue;
+    const g = COLS[v].scale === "log" ? x => Math.asinh(x / zone(v)) : x => x;
+    const vals = rows.map(r => r[v]).filter(ok).map(g); if (vals.length < 4) continue;
+    const q1 = quantile(vals, .25), q3 = quantile(vals, .75), lo = q1 - state.fence * (q3 - q1), hi = q3 + state.fence * (q3 - q1);
+    rows.forEach(r => { if (ok(r[v]) && (g(r[v]) < lo || g(r[v]) > hi)) out.add(r.id); });
+  }
+  return out;
+}
+function select() {
+  const res = {};
+  for (const gv of groupsShown()) {
+    const base = ROWS.filter(r => groupKey(r) === gv && passFilters(r));
+    const out = outlierSet(base.filter(r => ok(r[state.x]) && ok(r[state.y])));
+    const used = [], band = [], removed = [], outl = [];
+    for (const r of base) {
+      if (!ok(r[state.x])) continue;
+      if (!ok(r[state.y])) { if (state.band) (state.excluded.has(r.id) ? removed : band).push(r); continue; }
+      if (state.excluded.has(r.id)) removed.push(r); else if (out.has(r.id)) outl.push(r); else used.push(r);
+    }
+    res[gv] = { used, band, removed, outl };
+  }
+  return res;
+}
+const when = (rule, r) => rule && rule.values.includes(r[rule.column]);
+
+// ---------------------------------------------------------------- drawing
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const hexA = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16},${n >> 8 & 255},${n & 255},${a})`; };
+const jitter = i => (mulberry(i + 7)() - .5) * 2;
+function niceTicks(lo, hi) { const span = hi - lo || 1, step = Math.pow(10, Math.floor(Math.log10(span / 5))); const m = [1, 2, 5, 10].find(m => span / (m * step) <= 7) * step;
+  const out = []; for (let v = Math.ceil(lo / m) * m; v <= hi + 1e-9; v += m) out.push(+v.toFixed(10)); return out; }
+function limitsOf(axis, vals, T) {
+  const [a, b] = state.lim[axis]; let lo, hi;
+  if (vals.length) { const t = vals.map(T.f); lo = Math.min(...t); hi = Math.max(...t); } else { lo = 0; hi = 1; }
+  const pad = (hi - lo || 1) * .04; lo -= pad; hi += pad;
+  if (ok(a)) lo = T.f(a); if (ok(b)) hi = T.f(b); if (hi <= lo) hi = lo + 1; return [lo, hi];
+}
+let lastSel = null;
+function draw() {
+  const sel = select(), groups = Object.keys(sel), Tx = tf("x"), Ty = tf("y"), cb = state.colorBy;
+  lastSel = sel;
+  const ink = css("--ink"), muted = css("--muted"), line = css("--line"), panel = css("--panel");
+  const all = groups.flatMap(g => [...sel[g].used, ...sel[g].outl, ...sel[g].removed]);
+  const xs = [...all, ...groups.flatMap(g => sel[g].band)].map(r => r[state.x]).filter(ok), ys = all.map(r => r[state.y]).filter(ok);
+  const [x0, x1] = limitsOf("x", xs, Tx); let [y0, y1] = limitsOf("y", ys, Ty); const yData1 = y1;
+  const anyBand = groups.some(g => sel[g].band.length); let bandY = null;
+  if (anyBand) { const h = y1 - y0; bandY = y1 + .08 * h; y1 = y1 + .16 * h; }
+  const inLim = r => { const a = Tx.f(r[state.x]), b = Ty.f(r[state.y]); return a >= x0 && a <= x1 && b >= y0 && b <= yData1; };
+  const traces = [], shapes = [], annotations = [];
+  const n = groups.length, lanes = state.hist === "lanes" && n > 1;
+  const mainX = [0, .80], mainY = [0, lanes && state.splitBy ? .70 : .74], topY = [.78, 1], sideX = [.83, 1];  // room for two-line lane labels
+  const layout = { margin: { l: 64, r: 10, t: 10, b: 52 }, showlegend: true, hovermode: "closest", dragmode: "zoom",
+    legend: { orientation: "h", x: 0, y: -0.12, font: { size: 11.5, color: ink } },
+    paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", font: { family: css("--sans"), color: ink, size: 12 },
+    xaxis: { domain: mainX, range: [x0, x1], title: { text: L(state.x), font: { size: 12.5 } }, zeroline: false, gridcolor: line, linecolor: muted, showline: true, ticks: "outside", tickcolor: muted },
+    yaxis: { domain: mainY, range: [y0, y1], title: { text: L(state.y), font: { size: 12.5 } }, zeroline: false, gridcolor: line, linecolor: muted, showline: true, ticks: "outside", tickcolor: muted },
+    shapes, annotations };
+  if (Tx.ticks) Object.assign(layout.xaxis, Tx.ticks(x0, x1), { tickmode: "array" });
+  if (Ty.ticks) Object.assign(layout.yaxis, Ty.ticks(y0, yData1), { tickmode: "array" });
+  else if (bandY) { const tv = niceTicks(y0, yData1); Object.assign(layout.yaxis, { tickmode: "array", tickvals: tv, ticktext: tv.map(v => fmt(v)) }); }
+  const hover = r => `<b>${label(r)}</b><br>${(S.hover || []).concat([state.x, state.y]).filter((k, i, a) => a.indexOf(k) === i && COLS[k])
+    .map(k => `${short(k)}: ${COLS[k].kind === "category" ? (r[k] ?? "–") : fmt(r[k])}`).join("<br>")}`;
+  groups.forEach((g, gi) => {
+    const { used, band, removed, outl } = sel[g], st = styleOf(g), col = st.color, sym = st.symbol;
+    const pt = (arr, extra) => ({ type: "scattergl", mode: "markers", legendgroup: g, x: arr.map(r => Tx.f(r[state.x])), y: arr.map(r => Ty.f(r[state.y])),
+      customdata: arr.map(r => r.i), hovertext: arr.map(r => hover(r) + `<br><i>${state.excluded.has(r.id) ? "click to put back" : "click to remove"}</i>`), hoverinfo: "text", ...extra });
+    const solid = used.filter(r => !when(S.hollow_when, r)), hollow = used.filter(r => when(S.hollow_when, r));
+    traces.push(pt(solid, { name: `${g} (${used.length})`, marker: { color: col, symbol: sym, size: 8, opacity: .82, line: { color: panel, width: .6 } } }));
+    if (hollow.length) traces.push(pt(hollow, { showlegend: false, marker: { color: col, symbol: sym + "-open", size: 8, line: { color: col, width: 1.4 } } }));
+    const ringed = used.filter(r => when(S.ring_when, r));
+    if (ringed.length) traces.push({ ...pt(ringed, { showlegend: false, marker: { color: ink, symbol: "circle-open", size: 15, line: { color: ink, width: 1.2 } } }) });
+    if (band.length) traces.push({ ...pt(band, { showlegend: false, marker: { color: col, symbol: sym + "-open", size: 8, line: { color: col, width: 1.3 } } }),
+      y: band.map(r => bandY + jitter(r.i) * (y1 - y0) * .03) });
+    if (state.showexcl && (removed.length || outl.length)) {
+      const gr = [...removed, ...outl];
+      traces.push({ ...pt(gr, { showlegend: false, marker: { color: muted, symbol: "x-thin-open", size: 8, line: { color: muted, width: 1.4 } } }),
+        y: gr.map(r => ok(r[state.y]) ? Ty.f(r[state.y]) : bandY),
+        hovertext: gr.map(r => hover(r) + (state.excluded.has(r.id) ? "<br><i>removed by you</i>" : "<br><i>far outlier</i>")) });
+    }
+    if (state.trend && state.scale.x === "linear" && state.scale.y === "linear" && used.length >= 3) {
+      const fit = theilSen(used.map(r => r[state.x]), used.map(r => r[state.y]));
+      if (fit) { const lo = Math.max(x0, Math.min(...used.map(r => r[state.x]))), hi = Math.min(x1, Math.max(...used.map(r => r[state.x])));
+        traces.push({ type: "scatter", mode: "lines", x: [lo, hi], y: [fit.intercept + fit.slope * lo, fit.intercept + fit.slope * hi], line: { color: col, dash: st.dash === "solid" ? "dash" : st.dash, width: 1.5 }, hoverinfo: "skip", showlegend: false, legendgroup: g }); }
+    }
+  });
+  if (picked && ok(picked[state.x]) && ok(picked[state.y]) && passFilters(picked))
+    traces.push({ type: "scatter", mode: "markers", x: [Tx.f(picked[state.x])], y: [Ty.f(picked[state.y])], hoverinfo: "skip", showlegend: false,
+      marker: { size: 20, color: "rgba(0,0,0,0)", line: { color: css("--accent"), width: 3 } } });
+  if (bandY) { shapes.push({ type: "line", xref: "paper", x0: mainX[0], x1: mainX[1], yref: "y", y0: (yData1 + bandY) / 2 - .01 * (y1 - y0), y1: (yData1 + bandY) / 2 - .01 * (y1 - y0), line: { color: muted, width: 1, dash: "dot" } });
+    annotations.push({ xref: "paper", x: mainX[1], yref: "y", y: bandY + .035 * (y1 - y0), text: COLS[state.y].missing || `no ${short(state.y)} value`, showarrow: false, xanchor: "right", font: { size: 11, color: muted } }); }
+  const bins = Math.max(5, Math.min(80, state.bins | 0));
+  const hist = (vals, lo, hi) => { const c = new Array(bins).fill(0), w = (hi - lo) / bins;
+    vals.forEach(v => { let k = Math.floor((Math.min(Math.max(v, lo), hi) - lo) / w); if (k >= bins) k = bins - 1; if (k < 0) k = 0; c[k]++; });
+    const tot = vals.length || 1; return { c: c.map(v => v / tot), centers: c.map((_, k) => lo + (k + .5) * w), w }; };
+  const H = groups.map(g => { const u = sel[g].used;
+    return { g, hx: hist(u.map(r => Tx.f(r[state.x])), x0, x1), hy: hist(u.map(r => Ty.f(r[state.y])), y0, yData1),
+      mx: [median(u.map(r => r[state.x])), mean(u.map(r => r[state.x]))], my: [median(u.map(r => r[state.y])), mean(u.map(r => r[state.y]))] }; });
+  const top = Math.max(1e-9, ...H.flatMap(h => [...h.hx.c, ...h.hy.c])) * 1.12;
+  const laneCount = lanes ? n : 1, gap = .012;
+  H.forEach((h, k) => {
+    const lane = lanes ? k : 0, st = styleOf(h.g), col = st.color, ty = `y${2 + lane}`, tx = `x${2 + lane}`;
+    const th = (topY[1] - topY[0] - gap * (laneCount - 1)) / laneCount, tw = (sideX[1] - sideX[0] - gap * (laneCount - 1)) / laneCount;
+    layout[`yaxis${2 + lane}`] = { domain: [topY[1] - (lane + 1) * th - lane * gap, topY[1] - lane * th - lane * gap], anchor: "x", range: [0, top], showticklabels: false, showgrid: false, zeroline: false, showline: false, fixedrange: true };
+    layout[`xaxis${2 + lane}`] = { domain: [sideX[0] + lane * (tw + gap), sideX[0] + lane * (tw + gap) + tw], anchor: "y", range: [0, top], showticklabels: false, showgrid: false, zeroline: false, showline: false, fixedrange: true };
+    const fill = hexA(col, lanes ? .3 : .14);
+    const mk = { color: fill, line: { color: col, width: 1.2 }, ...(st.pattern ? { pattern: { shape: st.pattern, fgcolor: col, size: 6, solidity: .25 } } : {}) };
+    traces.push({ type: "bar", x: h.hx.centers, y: h.hx.c, width: h.hx.w, xaxis: "x", yaxis: ty, marker: mk, hoverinfo: "skip", showlegend: false, legendgroup: h.g });
+    traces.push({ type: "bar", orientation: "h", y: h.hy.centers, x: h.hy.c, width: h.hy.w, xaxis: tx, yaxis: "y", marker: mk, hoverinfo: "skip", showlegend: false, legendgroup: h.g });
+    [[h.mx[0], "solid"], [h.mx[1], "dot"]].forEach(([v, dash]) => { if (ok(v)) { const t = Math.min(Math.max(Tx.f(v), x0), x1);
+      shapes.push({ type: "line", xref: "x", x0: t, x1: t, yref: ty, y0: 0, y1: top * .95, line: { color: col, width: dash === "solid" ? 2.4 : 1.8, dash } }); } });
+    [[h.my[0], "solid"], [h.my[1], "dot"]].forEach(([v, dash]) => { if (ok(v)) { const t = Math.min(Math.max(Ty.f(v), y0), yData1);
+      shapes.push({ type: "line", yref: "y", y0: t, y1: t, xref: tx, x0: 0, x1: top * .95, line: { color: col, width: dash === "solid" ? 2.4 : 1.8, dash } }); } });
+    shapes.push({ type: "line", xref: "paper", x0: mainX[0], x1: mainX[1], yref: ty, y0: 0, y1: 0, line: { color: line, width: 1 } });
+    shapes.push({ type: "line", yref: "paper", y0: mainY[0], y1: mainY[1], xref: tx, x0: 0, x1: 0, line: { color: line, width: 1 } });
+    if (lanes) {
+      annotations.push({ xref: "paper", x: mainX[1] + .005, yref: ty, y: top * .5, text: h.g, showarrow: false, xanchor: "left", font: { size: 11, color: col } });
+      annotations.push({ xref: tx, x: top * .5, yref: "paper", y: mainY[1] + .005, text: laneLabel(h.g), hovertext: h.g, showarrow: false, yanchor: "bottom", font: { size: 10.5, color: col } });
+    }
+  });
+  Plotly.react("plot", traces, layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"], toImageButtonOptions: { format: "svg", filename: `${state.x}_vs_${state.y}` } });
+  const outside = groups.flatMap(g => sel[g].used).filter(r => !inLim(r)).length;
+  document.getElementById("note").textContent = outside ? `${outside} point${outside > 1 ? "s" : ""} lie outside the axis limits${state.limfilter ? " and are left out of the statistics" : " but still count in the statistics"}.` : "";
+  renderStats(sel, groups, inLim); renderExcluded(); syncControls();
+  hook("drawn", sel);
+}
+
+function statsFor(sel, groups, inLim, x = state.x, y = state.y) {
+  const use = g => sel[g].used.filter(r => !state.limfilter || !inLim || inLim(r));
+  const within = groups.map(g => { const u = use(g), xv = u.map(r => r[x]), yv = u.map(r => r[y]);
+    return { group: g, n: u.length, ...spearman(xv, yv, hashSeed(x + y + g)), x_median: median(xv), x_mean: mean(xv), y_median: median(yv), y_mean: mean(yv) }; });
+  const ph = holm(within.map(w => w.p)); within.forEach((w, k) => w.p_holm = ph[k]);
+  const between = [];
+  if (groups.length > 1) for (const v of [x, y]) {
+    const gs = groups.map(g => use(g).map(r => r[v])), pairs = [];
+    for (let a = 0; a < groups.length; a++) for (let b = a + 1; b < groups.length; b++) pairs.push({ variable: v, a: groups[a], b: groups[b], p: mannWhitney(gs[a], gs[b]) });
+    const hp = holm(pairs.map(p => p.p)); pairs.forEach((p, k) => p.p_holm = hp[k]);
+    between.push({ variable: v, kruskal_p: kruskal(gs), pairs });
+  }
+  return { within, between };
+}
+function renderStats(sel, groups, inLim) {
+  const { within, between } = statsFor(sel, groups, inLim);
+  document.getElementById("t-within").innerHTML = `<thead><tr><th>${groupTitle()}</th><th>n</th><th>${short(state.x)} median (mean)</th><th>${short(state.y)} median (mean)</th><th>Spearman ρ</th><th>p</th><th>Holm p</th></tr></thead><tbody>` +
+    within.map(w => `<tr><td class="name"><span class="sw" style="vertical-align:-1px;margin-right:6px;background:${styleOf(w.group).color}"></span>${w.group}</td><td>${w.n}</td><td>${fmt(w.x_median)} (${fmt(w.x_mean)})</td><td>${fmt(w.y_median)} (${fmt(w.y_mean)})</td>` +
+      `<td>${isFinite(w.rho) ? (w.rho >= 0 ? "+" : "") + w.rho.toFixed(2) : "–"}</td><td>${fmtP(w.p)}</td><td class="${w.p_holm < .05 ? "sig" : ""}">${fmtP(w.p_holm)} ${stars(w.p_holm)}</td></tr>`).join("") + "</tbody>";
+  document.getElementById("t-between").innerHTML = between.length ? `<thead><tr><th>Comparison</th><th>Mann-Whitney p</th><th>Holm p</th></tr></thead><tbody>` + between.map(b =>
+    `<tr><td class="name" colspan="3"><b>${short(b.variable)}</b>${isFinite(b.kruskal_p) ? ` · Kruskal-Wallis p ${fmtP(b.kruskal_p)} ${stars(b.kruskal_p)}` : ""}</td></tr>` +
+    b.pairs.map(p => `<tr><td class="name">${p.a} vs ${p.b}</td><td>${fmtP(p.p)}</td><td class="${p.p_holm < .05 ? "sig" : ""}">${fmtP(p.p_holm)} ${stars(p.p_holm)}</td></tr>`).join("")).join("") + "</tbody>"
+    : `<tbody><tr><td class="name">Show two or more groups to compare them.</td></tr></tbody>`;
+}
+function renderExcluded() {
+  const list = document.getElementById("excl-list"), keys = [...state.excluded];
+  document.getElementById("excl-count").textContent = keys.length ? `(${keys.length})` : "";
+  list.innerHTML = keys.length ? "" : `<span class="hint" style="margin:0">None. Click a point in the plot, then Remove.</span>`;
+  const byId = new Map(ROWS.map(r => [r.id, r]));
+  keys.forEach(k => { const r = byId.get(k); if (!r) return; const c = document.createElement("span"); c.className = "chip";
+    const sw = document.createElement("span"); sw.className = "sw"; sw.style.background = styleOf(groupKey(r), r).color; c.appendChild(sw);
+    c.appendChild(document.createTextNode(label(r)));
+    const b = document.createElement("button"); b.type = "button"; b.setAttribute("aria-label", "Put back " + label(r)); b.textContent = "×";
+    b.onclick = () => { state.excluded.delete(k); saveExcluded(); draw(); }; c.appendChild(b); list.appendChild(c); });
+}
+
+// ---------------------------------------------------------------- controls
+function buildControls() {
+  document.getElementById("title").textContent = S.title || "Data viewer";
+  document.title = S.title || "Data viewer";
+  document.getElementById("subtitle").textContent = S.subtitle || `${N} rows`;
+  document.getElementById("notes").textContent = S.notes || "";
+  const fbox = document.getElementById("filters");
+  (S.filters || []).forEach(c => {
+    const wrap = document.createElement("div"); wrap.className = "fgroup";
+    wrap.innerHTML = `<div class="fhead"><span>${L(c)}</span><span><button type="button" data-all>all</button> · <button type="button" data-none>none</button></span></div>`;
+    COLS[c].order.forEach(v => { const n = ROWS.filter(r => r[c] === v).length;
+      const row = document.createElement("label"); row.className = "frow";
+      row.innerHTML = `<input type="checkbox"><span class="sw" style="background:${colorOf(c, v)}"></span><span></span><span class="count">${n}</span>`;
+      row.children[2].textContent = v; const cbx = row.querySelector("input"); cbx.dataset.col = c; cbx.dataset.val = v;
+      cbx.onchange = () => { cbx.checked ? state.filters[c].add(v) : state.filters[c].delete(v); draw(); }; wrap.appendChild(row); });
+    wrap.querySelector("[data-all]").onclick = () => { state.filters[c] = new Set(COLS[c].order); draw(); };
+    wrap.querySelector("[data-none]").onclick = () => { state.filters[c] = new Set(); draw(); };
+    fbox.appendChild(wrap);
+  });
+  const cbs = document.getElementById("colorby"); cbs.innerHTML = CAT.map(c => `<option value="${c}">${L(c)}</option>`).join("");
+  cbs.onchange = () => { state.colorBy = cbs.value; if (state.splitBy === state.colorBy) state.splitBy = ""; draw(); };
+  const sbs = document.getElementById("splitby"); sbs.innerHTML = `<option value="">(none)</option>` + CAT.map(c => `<option value="${c}">${L(c)}</option>`).join("");
+  sbs.onchange = () => { state.splitBy = sbs.value === state.colorBy ? "" : sbs.value; draw(); };
+  document.querySelectorAll("[data-split]").forEach(b => b.onclick = () => { state.splitStyle = b.dataset.split; draw(); });
+  for (const axis of ["x", "y"]) {
+    const el = document.getElementById(`axis-${axis}`);
+    el.innerHTML = `<label for="v-${axis}" style="font-weight:600">${axis.toUpperCase()} axis</label>
+      <select id="v-${axis}">${NUM.map(k => `<option value="${k}">${L(k)}</option>`).join("")}</select>
+      <div class="seg" role="group" aria-label="${axis} scale"><button type="button" data-scale="linear">Linear</button><button type="button" data-scale="log">Symmetric log</button></div>
+      <div class="row2"><input type="number" id="min-${axis}" placeholder="min (auto)" aria-label="${axis} minimum"><input type="number" id="max-${axis}" placeholder="max (auto)" aria-label="${axis} maximum"></div>`;
+    el.querySelector("select").onchange = e => { applyView({ [axis]: e.target.value }); draw(); };
+    el.querySelectorAll("[data-scale]").forEach(b => b.onclick = () => { state.scale[axis] = b.dataset.scale; draw(); });
+    ["min", "max"].forEach((m, k) => document.getElementById(`${m}-${axis}`).onchange = e => { state.lim[axis][k] = e.target.value === "" ? null : +e.target.value; draw(); });
+  }
+  document.getElementById("swap").onclick = () => { [state.x, state.y] = [state.y, state.x]; [state.scale.x, state.scale.y] = [state.scale.y, state.scale.x]; [state.lim.x, state.lim.y] = [state.lim.y, state.lim.x]; draw(); };
+  const bind = (id, k, num) => { const el = document.getElementById(id); el.onchange = () => { state[k] = num ? +el.value : el.checked; draw(); }; };
+  bind("outliers", "outliers"); bind("fence", "fence", true); bind("band", "band"); bind("limfilter", "limfilter"); bind("showexcl", "showexcl"); bind("trend", "trend"); bind("bins", "bins", true);
+  document.querySelectorAll("[data-hist]").forEach(b => b.onclick = () => { state.hist = b.dataset.hist; draw(); });
+  document.getElementById("restore").onclick = () => { state.excluded.clear(); saveExcluded(); draw(); };
+  const vbox = document.getElementById("views");
+  (S.views || []).forEach(v => { const b = document.createElement("button"); b.className = "btn"; b.type = "button"; b.textContent = v.name; b.onclick = () => { applyView(v); draw(); }; vbox.appendChild(b); });
+  document.getElementById("saveview").onclick = () => { const name = `${short(state.y)} vs ${short(state.x)} · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    const mine = myViews(); mine.push({ name, ...viewOf() }); try { localStorage.setItem(STORE + ":views", JSON.stringify(mine)); } catch (e) {} renderMyViews(); };
+  document.getElementById("copyview").onclick = async e => { const t = JSON.stringify(viewOf()); try { await navigator.clipboard.writeText(t); e.target.textContent = "Copied"; } catch (err) { e.target.textContent = "Copy failed"; }
+    setTimeout(() => e.target.textContent = "Copy as text", 1500); };
+  renderMyViews();
+}
+const myViews = () => { try { return JSON.parse(localStorage.getItem(STORE + ":views") || "[]"); } catch (e) { return []; } };
+function renderMyViews() {
+  const box = document.getElementById("myviews"); box.innerHTML = ""; const mine = myViews();
+  if (!mine.length) { box.innerHTML = `<span class="hint" style="margin:0">Saved views stay in this browser.</span>`; return; }
+  mine.forEach((v, k) => { const c = document.createElement("span"); c.className = "chip"; const b = document.createElement("button"); b.type = "button"; b.textContent = v.name;
+    b.style.cssText = "color:var(--ink);font-size:12px;padding:0"; b.onclick = () => { applyView(v); draw(); }; c.appendChild(b);
+    const x = document.createElement("button"); x.type = "button"; x.textContent = "×"; x.setAttribute("aria-label", "Delete view " + v.name);
+    x.onclick = () => { mine.splice(k, 1); try { localStorage.setItem(STORE + ":views", JSON.stringify(mine)); } catch (e) {} renderMyViews(); }; c.appendChild(x); box.appendChild(c); });
+}
+function syncControls() {
+  for (const axis of ["x", "y"]) {
+    document.getElementById(`v-${axis}`).value = state[axis];
+    document.querySelectorAll(`#axis-${axis} [data-scale]`).forEach(b => b.setAttribute("aria-pressed", String(b.dataset.scale === state.scale[axis])));
+    ["min", "max"].forEach((m, k) => { const v = state.lim[axis][k]; const el = document.getElementById(`${m}-${axis}`); if (document.activeElement !== el) el.value = v == null ? "" : +(+v).toPrecision(3); });
+  }
+  document.getElementById("colorby").value = state.colorBy;
+  document.getElementById("splitby").value = state.splitBy;
+  document.querySelectorAll("#splitby option").forEach(o => o.disabled = o.value === state.colorBy);
+  document.querySelectorAll("[data-split]").forEach(b => { b.setAttribute("aria-pressed", String(b.dataset.split === state.splitStyle)); b.disabled = !state.splitBy; });
+  document.querySelectorAll("[data-hist]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.hist === state.hist)));
+  document.querySelectorAll("#filters input[type=checkbox]").forEach(c => c.checked = state.filters[c.dataset.col].has(c.dataset.val));
+  for (const k of ["outliers", "band", "limfilter", "showexcl", "trend"]) document.getElementById(k).checked = state[k];
+}
+// Selected point: its values and remove / put back; modules add actions (e.g. links) through the pickActions hook.
+let picked = null;
+function fmtVal(k, v) { if (v == null) return COLS[k]?.missing || "–"; return typeof v === "number" ? String(+v.toPrecision(4)) : v; }
+function showPick(r, redraw = true) {
+  picked = r; const box = document.getElementById("pick"); box.replaceChildren(); box.hidden = !r;
+  if (redraw) draw();  // rings the picked point; modules hear it through the "drawn" and "picked" hooks
+  hook("picked", r); if (!r) return;
+  const head = document.createElement("div"); head.className = "pick-head";
+  const t = document.createElement("b"); t.textContent = label(r); head.append(t);
+  hook("pickActions", r, head);
+  const rm = document.createElement("button"); rm.className = "btn"; rm.type = "button";
+  rm.textContent = state.excluded.has(r.id) ? "Put back" : "Remove from plot";
+  rm.onclick = () => { state.excluded.has(r.id) ? state.excluded.delete(r.id) : state.excluded.add(r.id); saveExcluded(); showPick(r); };
+  const x = document.createElement("button"); x.className = "btn"; x.type = "button"; x.textContent = "Close"; x.onclick = () => showPick(null);
+  head.append(rm, x); box.append(head);
+  const keys = [...new Set([state.x, state.y, state.colorBy, state.splitBy,...(S.hover || []), ...Object.keys(COLS)])].filter(k => COLS[k]);
+  const dl = document.createElement("dl");
+  for (const k of keys) { const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = COLS[k].short || COLS[k].label; dd.textContent = fmtVal(k, r[k]); dl.append(dt, dd); }
+  box.append(dl);
+}
+function bindPlot() {
+  const el = document.getElementById("plot");
+  el.on("plotly_click", ev => { const p = ev.points && ev.points[0]; if (!p || p.customdata == null) return;
+    showPick(ROWS[p.customdata]); });
+  el.on("plotly_relayout", ev => {
+    if (ev["xaxis.autorange"] || ev["yaxis.autorange"]) { state.lim = { x: [null, null], y: [null, null] }; setTimeout(draw, 0); return; }
+    let changed = false;
+    for (const axis of ["x", "y"]) { const a = ev[`${axis}axis.range[0]`], b = ev[`${axis}axis.range[1]`]; if (a != null && b != null) { const T = tf(axis); state.lim[axis] = [T.inv(a), T.inv(b)]; changed = true; } }
+    if (changed) setTimeout(draw, 0);
+  });
+}
+
+// ---------------------------------------------------------------- data tools: used by the chat module and by agents (window.viewer)
+const OPS = { "==": (a, b) => a === b || (+a === +b && a !== null && b !== null && a !== "" && !isNaN(+a)), "!=": (a, b) => !OPS["=="](a, b), "<": (a, b) => ok(a) && a < b, "<=": (a, b) => ok(a) && a <= b,
+  ">": (a, b) => ok(a) && a > b, ">=": (a, b) => ok(a) && a >= b, "in": (a, b) => Array.isArray(b) && b.some(v => OPS["=="](a, v)), "not in": (a, b) => !OPS["in"](a, b),
+  "is null": a => a == null, "not null": a => a != null };
+function rowsWhere(where = [], useView = false) {
+  for (const w of where) { if (!COLS[w.column]) throw new Error(`Unknown column ${w.column}. Columns: ${Object.keys(COLS).join(", ")}`); if (!OPS[w.op]) throw new Error(`Unknown op ${w.op}`); }
+  return ROWS.filter(r => (!useView || (passFilters(r) && !state.excluded.has(r.id))) && where.every(w => OPS[w.op](r[w.column], w.value)));
+}
+const WHERE = { type: "array", description: "Row conditions, all must hold. op: == != < <= > >= in 'not in' 'is null' 'not null'.",
+  items: { type: "object", properties: { column: { type: "string" }, op: { type: "string" }, value: {} }, required: ["column", "op"] } };
+const VIEWFLAG = { type: "boolean", description: "true: only rows passing the page's current filters and not removed by the viewer. Default false (whole table)." };
+const TOOLS = [
+  { name: "describe_data", description: "Column names, labels, kinds, units/descriptions, category values with counts, numeric ranges, and the plot's current view. Call first if unsure of column names.",
+    execute: () => ({ rows: N, columns: Object.fromEntries(Object.entries(COLS).map(([k, m]) => { const v = B.data[k];
+      if (m.kind === "category") return [k, { label: m.label, kind: "category", description: m.description, counts: Object.fromEntries(m.order.map(o => [o, v.filter(x => x === o).length])) }];
+      const nums = v.filter(ok); return [k, { label: m.label, kind: "number", description: m.description, missing: m.missing, n: nums.length, min: Math.min(...nums), median: median(nums), max: Math.max(...nums) }]; })),
+      current_view: viewOf(), removed_by_viewer: state.excluded.size }) },
+  { name: "query_rows", description: "Return rows (id, label and the requested columns) matching conditions, optionally sorted. At most 200 rows; returns the total count too.",
+    inputSchema: { type: "object", properties: { where: WHERE, columns: { type: "array", items: { type: "string" } }, sort_by: { type: "string" }, descending: { type: "boolean" }, limit: { type: "integer" }, current_view_only: VIEWFLAG } },
+    execute: i => { let rs = rowsWhere(i.where, i.current_view_only); const cols = (i.columns && i.columns.length ? i.columns : Object.keys(COLS)).filter(c => COLS[c]);
+      if (i.sort_by && COLS[i.sort_by]) rs = rs.slice().sort((a, b) => ((ok(a[i.sort_by]) ? a[i.sort_by] : -Infinity) - (ok(b[i.sort_by]) ? b[i.sort_by] : -Infinity)) * (i.descending ? -1 : 1));
+      const lim = Math.min(200, Math.max(1, i.limit | 0 || 50));
+      return { total: rs.length, returned: Math.min(lim, rs.length), rows: rs.slice(0, lim).map(r => ({ id: r.id, label: label(r), ...Object.fromEntries(cols.map(c => [c, r[c]])) })) }; } },
+  { name: "summarize", description: "Group rows by category columns and return n (non-missing), median, mean, sd, q25, q75, min, max of numeric columns per group.",
+    inputSchema: { type: "object", properties: { group_by: { type: "array", items: { type: "string" } }, columns: { type: "array", items: { type: "string" } }, where: WHERE, current_view_only: VIEWFLAG }, required: ["columns"] },
+    execute: i => { const rs = rowsWhere(i.where, i.current_view_only), gb = (i.group_by || []).filter(c => COLS[c]), cols = (i.columns || []).filter(c => COLS[c] && COLS[c].kind !== "category");
+      const groups = new Map(); rs.forEach(r => { const k = gb.map(c => r[c]).join(" | ") || "all"; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(r); });
+      return [...groups].map(([k, g]) => ({ group: k, rows: g.length, ...Object.fromEntries(cols.map(c => { const v = g.map(r => r[c]).filter(ok);
+        return [c, v.length ? { n: v.length, median: median(v), mean: mean(v), sd: sd(v), q25: quantile(v, .25), q75: quantile(v, .75), min: Math.min(...v), max: Math.max(...v) } : { n: 0 }]; })) })); } },
+  { name: "correlate", description: "Spearman rho (two-sided permutation p, Holm across groups) between two numeric columns, overall or per group of a category column.",
+    inputSchema: { type: "object", properties: { x: { type: "string" }, y: { type: "string" }, group_by: { type: "string" }, where: WHERE, current_view_only: VIEWFLAG }, required: ["x", "y"] },
+    execute: i => { if (!COLS[i.x] || !COLS[i.y]) throw new Error("Unknown column"); const rs = rowsWhere(i.where, i.current_view_only).filter(r => ok(r[i.x]) && ok(r[i.y]));
+      const gs = i.group_by && COLS[i.group_by] ? COLS[i.group_by].order.map(v => [v, rs.filter(r => r[i.group_by] === v)]) : [["all", rs]];
+      const out = gs.filter(([, g]) => g.length).map(([v, g]) => ({ group: v, n: g.length, ...spearman(g.map(r => r[i.x]), g.map(r => r[i.y]), hashSeed(i.x + i.y + v), 2000) }));
+      const h = holm(out.map(o => o.p)); out.forEach((o, k) => o.p_holm = h[k]); return out; } },
+  { name: "compare_groups", description: "Compare a numeric column between the groups of a category column: Kruskal-Wallis (3+ groups) and pairwise two-sided Mann-Whitney with Holm correction, plus n and median per group.",
+    inputSchema: { type: "object", properties: { column: { type: "string" }, group_by: { type: "string" }, where: WHERE, current_view_only: VIEWFLAG }, required: ["column", "group_by"] },
+    execute: i => { if (!COLS[i.column] || !COLS[i.group_by]) throw new Error("Unknown column"); const rs = rowsWhere(i.where, i.current_view_only).filter(r => ok(r[i.column]));
+      const gs = COLS[i.group_by].order.map(v => [v, rs.filter(r => r[i.group_by] === v).map(r => r[i.column])]).filter(([, v]) => v.length);
+      const pairs = []; for (let a = 0; a < gs.length; a++) for (let b = a + 1; b < gs.length; b++) pairs.push({ a: gs[a][0], b: gs[b][0], p: mannWhitney(gs[a][1], gs[b][1]) });
+      const h = holm(pairs.map(p => p.p)); pairs.forEach((p, k) => p.p_holm = h[k]);
+      return { groups: gs.map(([v, x]) => ({ group: v, n: x.length, median: median(x), mean: mean(x) })), kruskal_p: kruskal(gs.map(g => g[1])), pairs }; } },
+  { name: "set_view", description: "Change the plot. Any subset of: x, y (numeric columns), x_scale/y_scale ('linear'|'log'), x_limits/y_limits ([min,max], null for auto), color_by (category column), split_by (second category column, or null for none), split_style ('shade'|'style'|'color'), filters ({category column: [values to show]}), outliers, band (bool). Returns the resulting view and the statistics it shows.",
+    inputSchema: { type: "object", properties: { x: { type: "string" }, y: { type: "string" }, x_scale: { type: "string" }, y_scale: { type: "string" }, x_limits: { type: "array" }, y_limits: { type: "array" },
+      color_by: { type: "string" }, split_by: { type: ["string", "null"] }, split_style: { type: "string" }, filters: { type: "object" }, outliers: { type: "boolean" }, band: { type: "boolean" } } },
+    execute: i => { const v = { ...i }; if (v.x && !NUM.includes(v.x)) throw new Error(`x must be one of ${NUM.join(", ")}`); if (v.y && !NUM.includes(v.y)) throw new Error(`y must be one of ${NUM.join(", ")}`);
+      if (v.color_by && !CAT.includes(v.color_by)) throw new Error(`color_by must be one of ${CAT.join(", ")}`);
+      if (v.split_by && !CAT.includes(v.split_by)) throw new Error(`split_by must be null or one of ${CAT.join(", ")}`);
+      const xs = v.x_scale, ys = v.y_scale, xl = v.x_limits, yl = v.y_limits; applyView(v);
+      if (xs) state.scale.x = xs === "log" ? "log" : "linear"; if (ys) state.scale.y = ys === "log" ? "log" : "linear";
+      if (Array.isArray(xl)) state.lim.x = [xl[0] ?? null, xl[1] ?? null]; if (Array.isArray(yl)) state.lim.y = [yl[0] ?? null, yl[1] ?? null];
+      draw(); const st = statsFor(lastSel, Object.keys(lastSel), null);
+      return { view: viewOf(), within: st.within.map(w => ({ group: w.group, n: w.n, rho: w.rho, p_holm: w.p_holm })) }; } },
+  { name: "remove_points", description: "Remove rows from the plot and statistics (as if the viewer clicked them), by id list or conditions; or restore them with restore=true. Returns how many changed.",
+    inputSchema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } }, where: WHERE, restore: { type: "boolean" } } },
+    execute: i => { const ids = new Set(i.ids || []); const rs = i.where && i.where.length ? rowsWhere(i.where) : ROWS.filter(r => ids.has(r.id)); let n = 0;
+      rs.forEach(r => { if (i.restore ? state.excluded.delete(r.id) : !state.excluded.has(r.id) && state.excluded.add(r.id)) n++; }); saveExcluded(); draw(); return { changed: n, removed_total: state.excluded.size }; } },
+];
+// Same tools for any agent driving the page in a browser: window.viewer.query_rows({...}) etc.
+window.viewer = Object.fromEntries(TOOLS.map(t => [t.name, (input = {}) => t.execute(input)]));
+window.viewer.tools = TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
+
+/*MODULE_JS*/
+
+buildControls(); draw(); bindPlot(); hook("init");
+const mq = window.matchMedia("(prefers-color-scheme: dark)"); mq.addEventListener && mq.addEventListener("change", draw);
+new MutationObserver(draw).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+</script>
+</body>
+</html>
+

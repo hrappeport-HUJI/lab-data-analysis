@@ -20,10 +20,12 @@ def main(argv=None):
                         help="Computer or network allowed in network mode, e.g. 132.64.81.20 or 100.64.0.0/10 (Tailscale). Repeatable")
     parser.add_argument("--allow-host", action="append", default=[], metavar="NAME",
                         help="Extra name the browser may use for this computer, e.g. its Tailscale name. Repeatable")
+    parser.add_argument("--image-format", choices=["png", "jpeg"], default="png",
+                        help="Display images: png (lossless) or jpeg (about 4x smaller; for remote review)")
     args = parser.parse_args(argv)
     serve(args.project, args.port, args.run_id, read_only=args.read_only, open_browser=args.open,
           tagging_sets=args.tagging_set, host=args.host, allow_clients=args.allow_client,
-          allow_hosts=args.allow_host)
+          allow_hosts=args.allow_host, image_format=args.image_format)
 
 
 if __name__ == "__main__":

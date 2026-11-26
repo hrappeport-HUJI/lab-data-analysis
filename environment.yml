@@ -1,17 +1,20 @@
-# ScriptHub: the conda env for everything in this repo (plate_reader and scanlag_analyser) and for
-# the experiment notebooks, on Hagai's M1 Mac. PyCharm's "ScriptHub" interpreter points to it.
+# research: the conda env for everything in this repo (plate_reader, scanlag_analyser, microscopy), for
+# the experiment notebooks in ~/Research/Experiments and the projects in ~/Research/Code, on Hagai's M1 Mac.
 #
-#     conda env create -n ScriptHub -f environment-scripthub.yml     (from the repo root)
+#     conda env create -f environment.yml     (from the repo root)
 #
-# Python 3.12, because scanlag_analyser needs >= 3.11 (and zarr 3). It replaces the Python 3.10
-# ScriptHub of 2025, and keeps the packages that env had for other work.
+# Then put the shared legacy modules (util.py, reader_functions.py) on its path:
+#     echo /Users/hrappeport/Research/Code/_shared > "$(python -c 'import site; print(site.getsitepackages()[0])')/research_shared.pth"
+#
+# Python 3.12, because scanlag_analyser needs >= 3.11 (and zarr 3). It replaced the ScriptHub env on
+# 2026-11-15 (recorded in ~/Research/_reorg/env_records/) and keeps the packages that env had for other work.
 #
 # PyTorch comes from pip: PyTorch's macOS wheels for Apple silicon include the Apple-GPU backend
 # (MPS), which the ScanLag U-Net uses. Check with
 #     python -c "from scanlag.device import torch_device; print(torch_device())"     -> mps
 # opencv is the headless build (scanlag needs it; a second, Qt-based opencv clashes with the
 # review window's PyQt5). matplotlib-base, not matplotlib, which would also install PySide6.
-name: ScriptHub
+name: research
 channels:
   - conda-forge
   - nodefaults
@@ -41,7 +44,7 @@ dependencies:
   - fastremap
   - napari>=0.5
   - pyqt=5
-  # carried over from the 2025 ScriptHub
+  # carried over from the 2025 ScriptHub env
   - networkx
   - numba
   - line_profiler

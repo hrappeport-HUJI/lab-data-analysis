@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.scale import SymmetricalLogTransform
-from scipy.stats import rankdata, theilslopes
+from scipy.stats import kruskal, mannwhitneyu, rankdata, theilslopes
 
 VARIABLES = {
     "initial_PI": "Initial PI (ADU/pixel)",
@@ -54,6 +54,8 @@ DEFAULTS = dict(
     auto_limit_percentiles=(0, 100),
     log_linear_zone=None,        # {variable: half-width of the linear part of a log axis}
     bins=22, normalize_histograms=True,
+    marginal_style="lanes",      # "lanes": one row (top) / column (side) per condition; "overlay": all on one axis
+    strain_summary=True,         # table under each panel: n, median (mean) per condition and between-condition tests
     exclude_outliers=True, outlier_fence=3.0,
     include_non_dividers=False,
     trend_lines=True,
@@ -259,19 +261,141 @@ def _hist(ax, values, bins, color, horizontal, normalize):
     ax.stairs(counts, edges, orientation="horizontal" if horizontal else "vertical", baseline=None, color=color, lw=1.4)
 
 
-def _panel_axes(fig, spec, normalize):
-    sub = spec.subgridspec(3, 2, height_ratios=[.45, 1, 4.2], width_ratios=[4.2, 1], hspace=.05, wspace=.04)
+def _lanes(ax, samples, bins, colors, horizontal, normalize):
+    """One lane per condition on a common height scale: filled histogram, solid median and dotted mean.
+
+    ``samples`` is a list of (condition, values to bin, values for the median/mean, axis limits). The
+    first condition gets the top lane (top marginal) or the left lane (side marginal)."""
+    counts = []
+    for _, v, _, _ in samples:
+        c, edges = np.histogram(v, bins=bins)
+        counts.append(c / c.sum() if normalize and c.sum() else c.astype(float))
+    step = max([c.max() for c in counts if len(c)] + [0]) * 1.12 or 1.0
+    n = len(samples)
+    for k, ((name, _, raw, (lo, hi)), c) in enumerate(zip(samples, counts)):
+        base = k * step if horizontal else (n - 1 - k) * step
+        color = colors[name]
+        o = "horizontal" if horizontal else "vertical"
+        ax.stairs(c + base, edges, baseline=base, fill=True, alpha=.28, color=color, orientation=o, lw=0)
+        ax.stairs(c + base, edges, baseline=base, color=color, orientation=o, lw=1.3)
+        line = ax.axvline if horizontal else ax.axhline
+        line(base, color=MUTED, lw=.5, alpha=.6)
+        if len(raw):
+            for value, style in [(np.median(raw), "-"), (np.mean(raw), ":")]:
+                v = float(np.clip(value, lo, hi))
+                span = [base, base + step * .92]
+                ax.plot(span if horizontal else [v, v], [v, v] if horizontal else span, style, color=color,
+                        lw=2.2 if style == "-" else 1.8, solid_capstyle="butt")
+    (ax.set_xlim if horizontal else ax.set_ylim)(0, n * step)
+    (ax.set_xticks if horizontal else ax.set_yticks)([])
+
+
+def _holm(ps):
+    order, out, prev = np.argsort(ps), np.empty(len(ps)), 0.0
+    for i, k in enumerate(order):
+        prev = max(prev, min(1.0, ps[k] * (len(ps) - i))); out[k] = prev
+    return out
+
+
+def _between(samples):
+    """Kruskal-Wallis across >2 conditions, and two-sided Mann-Whitney per pair with Holm correction."""
+    samples = [(c, np.asarray(v, float)) for c, v in samples if len(v) >= 3]
+    names = [c for c, _ in samples]
+    kw = kruskal(*[v for _, v in samples]).pvalue if len(samples) > 2 else np.nan
+    pairs = list(itertools.combinations(range(len(samples)), 2))
+    ps = np.array([mannwhitneyu(samples[a][1], samples[b][1]).pvalue for a, b in pairs])
+    holm = _holm(ps) if len(ps) else ps
+    return kw, [(names[a], names[b], p, h) for (a, b), p, h in zip(pairs, ps, holm)]
+
+
+def strain_differences(data, figure, *settings, **overrides):
+    """Per panel and variable: n, median and mean per condition, and between-condition tests.
+
+    Uses the founders a figure shows as filled markers (outliers removed). Pairwise p values are
+    Holm-corrected within one panel and variable; Kruskal-Wallis is reported for panels of 3+ conditions."""
+    s = _settings(settings, overrides)
+    keep = set(_conditions(data, s, figure))
+    rows = []
+    for group in _panels(data, s):
+        group = [c for c in group if c in keep]
+        used = {c: _select(data.founders, c, *FIGURES[figure], s)[0] for c in group}
+        for var in FIGURES[figure]:
+            samples = [(c, used[c][var].dropna().to_numpy()) for c in group]
+            kw, pairs = _between(samples) if len(group) > 1 else (np.nan, [])
+            for c, v in samples:
+                rows.append({"figure": figure, "panel": " + ".join(group), "variable": var, "kind": "summary",
+                             "condition": c, "n": len(v), "median": np.median(v) if len(v) else np.nan,
+                             "mean": np.mean(v) if len(v) else np.nan, "p": np.nan, "p_holm": np.nan})
+            if np.isfinite(kw):
+                rows.append({"figure": figure, "panel": " + ".join(group), "variable": var, "kind": "Kruskal-Wallis",
+                             "condition": "all", "p": kw, "p_holm": np.nan})
+            for a, b, p, h in pairs:
+                rows.append({"figure": figure, "panel": " + ".join(group), "variable": var, "kind": "Mann-Whitney",
+                             "condition": f"{a} vs {b}", "p": p, "p_holm": h})
+    return pd.DataFrame(rows)
+
+
+def _fmt(v):
+    return "–" if not np.isfinite(v) else f"{v:.3g}" if abs(v) < 1000 else f"{v:.0f}"
+
+
+def _p(p):
+    stars = "***" if p < .001 else "**" if p < .01 else "*" if p < .05 else "ns"
+    return f"{p:.1g} {stars}" if p >= 1e-99 else f"<1e-99 {stars}"
+
+
+def _summary_text(table, x, y, group):
+    """Monospace block: per-condition n / median (mean), then the between-condition tests."""
+    if table.empty:
+        return ""
+    t = table[table.kind == "summary"]
+    w = max(len(c) for c in group) + 2
+    head = f"{'':{w}}{'n':>5}   {'median (mean)':<24}{'median (mean)'}"
+    sub = f"{'':{w}}{'':>5}   {VARIABLES[x].split(' (')[0]:<24}{VARIABLES[y].split(' (')[0]}"
+    lines = [sub, head]
+    for c in group:
+        rx, ry = t[(t.condition == c) & (t.variable == x)], t[(t.condition == c) & (t.variable == y)]
+        if rx.empty:
+            continue
+        rx, ry = rx.iloc[0], ry.iloc[0]
+        lines.append(f"{c:{w}}{int(ry.n):>5}   {_fmt(rx['median']) + ' (' + _fmt(rx['mean']) + ')':<24}"
+                     f"{_fmt(ry['median'])} ({_fmt(ry['mean'])})")
+    if len(group) > 1:
+        lines.append("Between strains (Mann-Whitney, Holm-corrected" + (", Kruskal-Wallis across all):" if len(group) > 2 else "):"))
+        for var in (x, y):
+            tv = table[table.variable == var]
+            kw = tv[tv.kind == "Kruskal-Wallis"]
+            pairs = [f"{r.condition.replace(' vs ', '–')} {_p(r.p_holm)}" for r in tv[tv.kind == "Mann-Whitney"].itertuples()]
+            name = VARIABLES[var].split(" (")[0]
+            first = f"  {name}: " + (f"KW p {_p(kw.p.iloc[0])}; " if len(kw) else "")
+            chunks, line = [], first
+            for pr in pairs:
+                if len(line) + len(pr) > 96:
+                    chunks.append(line.rstrip("; ")); line = "    "
+                line += pr + "; "
+            chunks.append(line.rstrip("; "))
+            lines.extend(chunks)
+    return "\n".join(lines)
+
+
+def _panel_axes(fig, spec, normalize, s=None, n_lanes=1, summary_lines=0, legend_rows=1):
+    lanes = (s or {}).get("marginal_style", "overlay") == "lanes" and n_lanes > 1
+    top_h, side_w = (min(1 + .32 * n_lanes, 2.2), min(.9 + .25 * n_lanes, 1.9)) if lanes else (1, 1)
+    sub = spec.subgridspec(5, 2, height_ratios=[.25 + .4 * legend_rows, top_h, 4.2, .55 if summary_lines else .01,
+                                                .14 * summary_lines + .01],
+                           width_ratios=[4.2, side_w], hspace=.05, wspace=.04)
     leg = fig.add_subplot(sub[0, :]); leg.axis("off")
     top = fig.add_subplot(sub[1, 0]); main = fig.add_subplot(sub[2, 0], sharex=top)
     side = fig.add_subplot(sub[2, 1], sharey=main)
-    unit = "fraction" if normalize else "cells"
+    text = fig.add_subplot(sub[4, :]); text.axis("off")
+    unit = ("fraction" if normalize else "cells") + ("\n(same scale\nin every lane)" if lanes else "")
     for a in (top, side):
         a.spines[["top", "right"]].set_visible(False); a.tick_params(labelsize=7, colors=MUTED)
     top.tick_params(labelbottom=False); side.tick_params(labelleft=False)
     top.set_ylabel(unit, fontsize=7, color=MUTED); side.set_xlabel(unit, fontsize=7, color=MUTED)
     main.spines[["top", "right"]].set_visible(False); main.grid(axis="y", alpha=.16); main.set_axisbelow(True)
     main.tick_params(labelsize=8, colors=INK)
-    return leg, top, main, side
+    return leg, top, main, side, text
 
 
 def _finish(fig, s):
@@ -312,12 +436,21 @@ def plot(data, figure, *settings, **overrides):
     if lag and not isinstance(s["y_limits"], (tuple, list)):
         ylim = {i: (min(0, lo) if s["y_scale"] == "linear" else lo, hi) for i, (lo, hi) in ylim.items()}
 
+    diffs = strain_differences(data, figure, s) if s["strain_summary"] else pd.DataFrame()
+    texts = {i: _summary_text(diffs[diffs.panel == " + ".join(g)] if len(diffs) else diffs, x, y, g)
+             for i, g in enumerate(panels)}
+    n_text = max([t.count("\n") + 1 if t else 0 for t in texts.values()])
     cols = min(s["columns"], len(panels)); rows = -(-len(panels) // cols)
-    fig = plt.figure(figsize=(s["panel_size"][0] * cols, s["panel_size"][1] * rows))
+    leg_rows = max(-(-(len(g) + (s["marginal_style"] == "lanes" and len(g) > 1)) // min(2, len(g))) for g in panels)
+    extra_h = .17 * n_text + .35 * (leg_rows - 1)
+    fig = plt.figure(figsize=(s["panel_size"][0] * cols, (s["panel_size"][1] + extra_h) * rows))
     outer = fig.add_gridspec(rows, cols, hspace=.45, wspace=.28)
     fig.suptitle(f"{VARIABLES[y]} vs {VARIABLES[x]}", fontsize=13, color=INK, x=.01, ha="left")
     for i, group in enumerate(panels):
-        leg, top, ax, side = _panel_axes(fig, outer[i // cols, i % cols], s["normalize_histograms"])
+        leg, top, ax, side, text = _panel_axes(fig, outer[i // cols, i % cols], s["normalize_histograms"], s,
+                                               len(group), n_text + 1 if n_text else 0, leg_rows)
+        lanes = s["marginal_style"] == "lanes" and len(group) > 1
+        top_samples, side_samples = [], []
         (x0, x1), (y0, y1) = xlim[i], ylim[i]
         fy0, fy1 = ax_y.fwd([y0, y1]); h = fy1 - fy0
         band, ytop = (ax_y.inv([fy1 + .10 * h, fy1 + .19 * h]) if lag and s["include_non_dividers"] else (None, y1))
@@ -343,8 +476,12 @@ def plot(data, figure, *settings, **overrides):
                 yy = r.theil_sen_intercept + r.theil_sen_slope * xx
                 inside = (yy >= y0) & (yy <= y1)
                 ax.plot(xx[inside], yy[inside], "--", color=color, lw=1.5, zorder=2)
-            _hist(top, np.clip(np.r_[used[x], extra[x]], x0, x1), xb, color, False, s["normalize_histograms"])
-            _hist(side, np.clip(used[y], y0, y1), yb, color, True, s["normalize_histograms"])
+            if lanes:
+                top_samples.append((c, np.clip(np.r_[used[x], extra[x]], x0, x1), used[x].to_numpy(), (x0, x1)))
+                side_samples.append((c, np.clip(used[y], y0, y1), used[y].to_numpy(), (y0, y1)))
+            else:
+                _hist(top, np.clip(np.r_[used[x], extra[x]], x0, x1), xb, color, False, s["normalize_histograms"])
+                _hist(side, np.clip(used[y], y0, y1), yb, color, True, s["normalize_histograms"])
             stat = (f"ρ {r.spearman_rho:+.2f}, p {r.p:.2g} (Holm {r.p_holm:.2g})" if np.isfinite(r.p)
                     else "too few for a test")
             what = f"{r.n} divided" if lag else f"{r.n} founders"
@@ -371,9 +508,17 @@ def plot(data, figure, *settings, **overrides):
         if out_x or out_y:
             ax.text(1, -.17, f"outside the limits: {out_x} in x, {out_y} in y (drawn at the edge)",
                     transform=ax.transAxes, ha="right", fontsize=7, color=MUTED)
-        top.set_ylim(0, None); side.set_xlim(0, None)
-        leg.set_title(" + ".join(group), fontsize=11, color=INK, loc="left", pad=2)
-        leg.legend(handles=handles, fontsize=7.6, frameon=False, loc="center left", ncol=min(2, len(group)),
+        if lanes:
+            _lanes(top, top_samples, xb, colors, False, s["normalize_histograms"])
+            _lanes(side, side_samples, yb, colors, True, s["normalize_histograms"])
+            handles.append(Line2D([0], [0], color=MUTED, lw=2.2, label="histograms: median (solid), mean (dotted)"))
+        else:
+            top.set_ylim(0, None); side.set_xlim(0, None)
+        if texts[i]:
+            text.text(0, 1, texts[i], transform=text.transAxes, va="top", ha="left", family="monospace",
+                      fontsize=7.4, color=INK)
+        leg.text(0, 1, " + ".join(group), transform=leg.transAxes, fontsize=11, color=INK, va="top")
+        leg.legend(handles=handles, fontsize=7.6, frameon=False, loc="lower left", ncol=min(2, len(group)),
                    labelcolor=INK, handlelength=2, borderaxespad=0)
         ax.set_xlabel(VARIABLES[x], fontsize=8.5, color=INK); ax.set_ylabel(VARIABLES[y], fontsize=8.5, color=INK)
     _finish(fig, s)

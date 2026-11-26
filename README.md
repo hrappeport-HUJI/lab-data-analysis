@@ -4,9 +4,10 @@ Code for analyses that repeat across experiments. It holds code only.
 
 | What | Where |
 |---|---|
-| Code | This repo, cloned to `~/Research/lab-data-analysis` |
-| Data: raw files, plate maps, notebooks and results of each experiment | `~/PycharmProjects/ScriptHub/ReaderPlot/YYYY_MM_DD_name/`, backed up on Google Drive |
-| How to run an analysis, and what to ask first | [Microscopy skill](skills/microscopy-experiment/SKILL.md) in this repo and plate-reader/ScanLag skills in the Zettelkasten's `Library/Skills/` where available |
+| Code | This repo, cloned to `~/Research/Code/lab-data-analysis` (or your own workspace on the shared lab PC) |
+| Data: raw files, plate maps, notebooks and results of each experiment | `~/Research/Experiments/YYYY-MM-DD <description>/`, backed up on Google Drive |
+| Tools for the experiment folders (index, deep archive) | `experiments/` |
+| How to run an analysis, and what to ask first | [Microscopy skill](skills/microscopy-experiment/SKILL.md) and [ScanLag skill](scanlag_analyser/skills/scanlag-analysis/SKILL.md) in this repo, plus plate-reader/local skills in the Zettelkasten (`Library/Skills/`) where available |
 | What an experiment was and what it showed | Experiment notes in the Zettelkasten: `Library/LabNotebook/Experiments/` |
 
 `.gitignore` keeps common data formats out of this repo. Don't add data, results or figures here.
@@ -48,7 +49,7 @@ git remote add scanlag-upstream https://github.com/alongutf/scanlag_analyser  # 
 git subtree pull --prefix=scanlag_analyser scanlag-upstream master
 ```
 
-To analyze a run, give an agent the `scanlag-experiment` skill (`Library/Skills/scanlag-experiment/` in the Zettelkasten), or follow it yourself: `scripts/inspect_scans.py` checks the scans and time zero, `scripts/check_density.py` finds TNTC plates, `scripts/scanlag_pipeline.py` segments and tracks, and `scripts/scanlag_analysis.py` draws the histograms. On Hagai's Mac it runs in the `ScriptHub` env (`environment-scripthub.yml` at the repo root, which also covers `plate_reader`), with the U-Net on the Apple GPU.
+To analyze a run, give an agent the general skill in the folder, `scanlag_analyser/skills/scanlag-analysis/SKILL.md`, or follow it yourself. In Hagai's workspace use the `scanlag-experiment` skill in the Zettelkasten (`Library/Skills/scanlag-experiment/`) instead: it points to the general skill and adds the local paths, env and results note. In short: `scripts/inspect_scans.py` checks the scans and time zero, `scripts/check_density.py` finds TNTC plates, `scripts/scanlag_pipeline.py` segments and tracks, and `scripts/scanlag_analysis.py` draws the histograms, and `scripts/scanlag_viewer.py` builds the interactive viewer. On Hagai's Mac it runs in the `research` env (`environment.yml` at the repo root, which also covers `plate_reader` and `microscopy`), with the U-Net on the Apple GPU.
 
 Tests:
 
@@ -87,4 +88,13 @@ The [microscopy-experiment skill](skills/microscopy-experiment/SKILL.md) lives i
 
 ```sh
 python -m pytest microscopy/tests plate_reader/tests
+```
+
+## Data viewer
+
+The [data-viewer skill](skills/data-viewer/SKILL.md) turns any results table into an interactive page: a scatter with histograms on the sides, filters, live statistics, preset and saved views. The page opens by double-click on any computer and can be emailed. Optional modules add links from a point to its source data and a chat box. The skill folder holds the builder, the page and its tests, and can be copied into a skills directory as it is.
+
+```sh
+python skills/data-viewer/build_viewer.py build table.csv spec.json viewer.html
+python -m pytest skills/data-viewer/tests
 ```

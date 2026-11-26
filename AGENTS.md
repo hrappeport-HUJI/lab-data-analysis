@@ -2,9 +2,9 @@
 
 This repo holds code for repeating lab analyses, and no data. `README.md` describes it.
 
-If `~/Research/Zettelkasten/Library/Skills/` exists on this machine, follow `reader-experiment/SKILL.md` there for plate-reader runs and `scanlag-experiment/SKILL.md` for ScanLag runs. Otherwise use the repository documentation and ask for any missing experiment-specific instructions.
+If `~/Research/Zettelkasten/Library/Skills/` exists on this machine, follow `reader-experiment/SKILL.md` there for plate-reader runs and `scanlag-experiment/SKILL.md` for ScanLag runs (which points to the general skill `scanlag_analyser/skills/scanlag-analysis/SKILL.md` in this repo and adds local paths; keep the general skill free of local paths, names, and record-keeping rules, and update it in the same commit when ScanLag script options or outputs change). Otherwise use the repository documentation (`scanlag_analyser/skills/scanlag-analysis/SKILL.md` for ScanLag, `README.md` for plate reader) and ask for any missing experiment-specific instructions.
 
-Run `python -m pytest plate_reader/tests` (and `cd scanlag_analyser && python -m pytest tests` for ScanLag) after changing code. Commit only when asked.
+Run `python -m pytest plate_reader/tests` (and `cd scanlag_analyser && python -m pytest tests` for ScanLag) after changing code. Commit only when asked. Git rules shared by every repo (keep the shared checkout on `main`, larger work on a pushed branch, nothing left unsaved): `~/Research/AGENTS.md` (**Git**).
 
 ## Microscopy
 
@@ -26,3 +26,4 @@ A background job is not "running" until you have seen it make progress. After la
 3. Scripts that call `microscopy.pipeline.run` with `field_workers > 1` must put the call under `if __name__ == "__main__":`. Worker processes re-import the script.
 4. Check memory and disk before heavy jobs, and run them at lower priority. Never auto-chain a heavy step without checking what the previous step produced. Microscopy runs now refuse to start or continue below 3 GB of free disk, and refuse to load a run file too large for this computer's RAM.
 5. Keep project copies and runs outside temporary or session scratch folders, which can be wiped.
+6. Start servers and multi-hour jobs as detached processes, not as background tasks of an agent session: a session restart stops those. On the Windows lab PC use a `.ps1` launcher with `Start-Process`; see `docs/microscopy/lab_pc_notes.md`, which also lists the Windows-specific traps found so far.

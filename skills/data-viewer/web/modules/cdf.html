@@ -1,0 +1,18 @@
+<div class="card" id="cdf-card">
+  <div class="cdf-head">
+    <h2 id="cdf-title">Survival curves (1 − CDF)</h2>
+    <label>Variable <select id="cdf-col" aria-label="Variable of the 1 − CDF"></select></label>
+    <span class="cdf-ax">x
+    <span class="seg" role="group" aria-label="1 − CDF x scale">
+      <button type="button" data-cdf-axis="x" data-cdf-scale="linear" aria-pressed="true">Linear</button>
+      <button type="button" data-cdf-axis="x" data-cdf-scale="log" aria-pressed="false">Log</button>
+    </span></span>
+    <span class="cdf-ax">y
+    <span class="seg" role="group" aria-label="1 − CDF y scale">
+      <button type="button" data-cdf-axis="y" data-cdf-scale="linear" aria-pressed="false">Linear</button>
+      <button type="button" data-cdf-axis="y" data-cdf-scale="log" aria-pressed="true">Log</button>
+    </span></span>
+  </div>
+  <div id="cdf-plot"></div>
+  <p class="hint" id="cdf-hint">Fraction of each group's rows whose value is still above x, one curve per group (the "Colour by" choice, split by the second grouping if one is set). Uses every row that passes the filters and has a value, including rows with no Y value and far outliers; rows you removed are left out. n per group is in the legend.</p>
+</div>

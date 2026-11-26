@@ -65,3 +65,19 @@ def test_every_figure_draws_and_settings_override(result, tmp_path):
     assert set(fp.removed_outliers(d, tables).columns) >= {"id", "figure"}
     with pytest.raises(ValueError, match="Unknown setting"):
         fp.plot(d, "initial_PI_vs_lag", common, dict(typo=1))
+
+
+def test_strain_differences_and_lane_marginals(result, tmp_path):
+    d = fp.load(result)
+    s = dict(show=False, panels=[["A", "B", "NOYFP"]])
+    t = fp.strain_differences(d, "initial_PI_vs_lag", s)
+    summary = t[(t.kind == "summary") & (t.variable == "initial_PI")].set_index("condition")
+    assert summary.loc["A", "n"] == 9 and summary.loc["A", "median"] == pytest.approx(90)
+    # identical distributions in every condition: no difference, Holm p never below the raw p
+    pairs = t[t.kind == "Mann-Whitney"]
+    assert len(pairs) == 6 and (pairs.p_holm >= pairs.p - 1e-12).all() and (pairs.p > .5).all()
+    assert len(t[t.kind == "Kruskal-Wallis"]) == 2
+    for style in ["lanes", "overlay"]:
+        fp.plot(d, "initial_PI_vs_lag", s, marginal_style=style, save_to=tmp_path / style)
+        assert (tmp_path / f"{style}.png").exists()
+    fp.plot(d, "initial_PI_vs_lag", s, strain_summary=False)

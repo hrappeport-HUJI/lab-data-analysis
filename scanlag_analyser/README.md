@@ -18,6 +18,13 @@ For every scanner in an experiment it:
 
 The raw scans are **only ever read**. Every output goes to a separate results folder.
 
+**With an AI agent.** `skills/scanlag-analysis/SKILL.md` is an agent skill (the open `SKILL.md` format used by
+Claude Code, Codex and others) that walks an agent through a whole run: checking the scans and time zero,
+TNTC plates, the plate-to-condition map, the pipeline and QC report, pausing for your review, and the
+histograms with their sanity checks. Copy or link the `skills/scanlag-analysis` folder into your agent's
+skills folder (e.g. `~/.claude/skills/`), or tell the agent to read the file. A lab can wrap it in its own
+skill that adds local paths and record-keeping.
+
 ---
 
 ## Contents
@@ -657,6 +664,8 @@ AMP5,1-5.1u,4-6
 
 * A condition can span several scanners; a scanner's plates can be split over several conditions.
 * Rows with an empty `condition` are ignored (so you can leave plates out).
+* Extra columns (e.g. `strain`, `medium`, `replicate`) are ignored by the analysis and become filters and
+  colours in the interactive viewer (`scanlag_viewer.py`, below). Split a row when its plates differ in one.
 * A plate listed in two conditions is an error.
 * A listed plate without results (an empty slot, or not processed) is skipped with a warning.
 * Two condition names that would get the same output folder (e.g. `A B` and `A/B`, see "Condition folder
@@ -751,6 +760,31 @@ python scripts\scanlag_analysis.py "E:\results\EPEC260224_classical"
 :: conditions on the command line, written to a separate folder, no browser
 python scripts\scanlag_analysis.py EPEC260224 --condition "CTRL=1-4.1u:1-3;1-5.1u:1-3" --condition "AMP7=1-4.1u:4-6;1-5.1u:4-6" --out "results\EPEC260224\analysis_v2" --no-open
 ```
+
+### Interactive viewer (`scanlag_viewer.py`)
+
+```bat
+python scripts\scanlag_viewer.py <results folder> [<results folder> ...] [--out FILE] [--plotly cdn|inline]
+                                  [--color-by COLUMN] [--split-by COLUMN] [--split-style shade|style|color]
+```
+
+Run after `scanlag_analysis.py`. Several results folders (e.g. two scan days of one experiment) go into one page
+with `--out`; they must have been analysed with the same fit settings, and if a scanner name occurs in two of
+them, every scanner is shown as `<results folder>/<scanner>`. It reads `analysis/all_colonies.csv` and `conditions.csv` and writes
+`analysis/viewer.html`: one self-contained page (double-click to open, can be emailed) with one point per
+included colony. Built with the data-viewer in `../skills/data-viewer` of
+[lab-data-analysis](https://github.com/hrappeport-HUJI/lab-data-analysis); if this folder is used on its own,
+set `DATA_VIEWER_DIR` to a copy of it.
+
+| Part | What it shows |
+|---|---|
+| Show / Groups | Condition, the extra columns of `conditions.csv`, scanner, plate, merged or not, flagged-and-kept or not. Every plot and table follows the ticks. Groups are the *Colour by* category, optionally split by a second (*Then split by*, e.g. condition × day), shown as shades of the colour, as marker/line/bar styles, or as a colour each (`--split-by`, `--split-style` set the start). |
+| Preset views | *Lag histograms (all colonies)*; *Lag vs growth rate* and *Lag vs doubling time* (scatter with per-group histograms on both axes, colonies without a growth value in a labelled band); *Lag vs growth rate, by plate*. |
+| 1 − CDF card | Fraction of each group's colonies not yet appeared by time x; x and y each linear or log (log y by default); switchable to growth rate or doubling time. |
+| Tables | Spearman rho with permutation p per group, and Mann-Whitney / Kruskal-Wallis between groups, Holm-corrected, recomputed on what is shown. |
+
+"Lag" in the viewer is the appearance time (first detection), as the page's notes say. `--plotly inline` makes a
+page that works offline (+3.5 MB); `--color-by` picks the first colour grouping (default `condition`).
 
 ---
 
@@ -1482,6 +1516,7 @@ scanlag_analyser/
     check_density.py            quick TNTC check of every plate, before the pipeline
     scanlag_pipeline.py         raw scans → results → review window → export
     scanlag_analysis.py         conditions → tables + histograms
+    scanlag_viewer.py           analysis → interactive viewer (lag, 1 − CDF, growth vs lag)
     compare_with_matlab.py      new results vs a MATLAB analysis
     build_testset.py            MATLAB replay → reference test set
     select_tiles.py             choose tiles for hand correction
