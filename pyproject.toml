@@ -19,7 +19,7 @@ lab-microscopy = "microscopy.cli:main"
 include = ["microscopy*"]
 
 [tool.setuptools.package-data]
-microscopy = ["web/*.html", "web/*.js", "web/*.css", "workbench/web/*.html", "workbench/web/*.js", "workbench/web/*.css"]
+microscopy = ["web/*.html", "web/*.js", "web/*.css", "workbench/web/*.html", "workbench/web/*.js", "workbench/web/*.css", "position_viewer/web/*.html", "position_viewer/web/*.js", "position_viewer/web/*.css"]
 
 [tool.pytest.ini_options]
 testpaths = ["microscopy/tests", "plate_reader/tests"]
