@@ -20,9 +20,11 @@ import json
 import math
 import time
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Concatenate, Iterator, Mapping, ParamSpec, Sequence, TypeVar
 
 import numpy as np
 
@@ -33,6 +35,7 @@ from microscopy.founder_tracker import (
     fast_bg_median,
     filter_phase_dark_labels,
 )
+from microscopy.gpu_lock import gpu_lock, gpu_lock_disabled
 
 
 @dataclass(frozen=True)
@@ -360,6 +363,21 @@ class FrameProfile:
     t_total_ms: float
 
 
+_Params = ParamSpec("_Params")
+_Result = TypeVar("_Result")
+
+
+def _with_gpu_session(
+    method: Callable[Concatenate[FastOmniposeRunner, _Params], _Result],
+) -> Callable[Concatenate[FastOmniposeRunner, _Params], _Result]:
+    @wraps(method)
+    def run(runner: FastOmniposeRunner, /, *args: _Params.args, **kwargs: _Params.kwargs) -> _Result:
+        with runner.gpu_session(method.__qualname__):
+            return method(runner, *args, **kwargs)
+
+    return run
+
+
 class FastOmniposeRunner:
     """GPU Stop-on-Event Packed Active-ROI Omnipose + Online FounderTracker."""
 
@@ -370,19 +388,47 @@ class FastOmniposeRunner:
         min_roi_size: int = 160,
         context_pad: int = 16,
         cfg: TrackerConfig | None = None,
+        *,
+        use_gpu_lock: bool = True,
+        gpu_lock_path: str | Path | None = None,
+        gpu_lock_timeout_s: float | None = None,
     ) -> None:
         self.model_type = model_type
         self.gpu = gpu
         self.min_roi_size = int(min_roi_size)
         self.context_pad = int(context_pad)
         self.cfg = cfg or TrackerConfig()
+        self.use_gpu_lock = use_gpu_lock
+        self.gpu_lock_path = gpu_lock_path
+        self.gpu_lock_timeout_s = gpu_lock_timeout_s
+        self._gpu_session_active = False
         self._model = None
         self._torch = None
         self._transforms = None
         self._omnipose_core = None
 
+    @contextmanager
+    def gpu_session(self, job: str = "FastOmnipose") -> Iterator[None]:
+        """Keep GPU ownership and the CUDA model across a group of runner calls."""
+        if self._gpu_session_active or not (self.gpu and self.use_gpu_lock) or gpu_lock_disabled():
+            yield
+            return
+
+        with gpu_lock(lock_path=self.gpu_lock_path, timeout_s=self.gpu_lock_timeout_s, job=job):
+            self._gpu_session_active = True
+            try:
+                yield
+            finally:
+                self._gpu_session_active = False
+                if self._model is not None and self._model.gpu:
+                    # Free model allocations and the allocator's unused blocks
+                    # before handing the GPU to the next process.
+                    self._model = None
+                    self._torch.cuda.empty_cache()
+
+    @_with_gpu_session
     def load_model(self) -> float:
-        """Lazily load ``bact_phase_omni`` onto GPU (FP32)."""
+        """Lazily load the FP32 model within the current GPU session."""
         if self._model is not None:
             return 0.0
         t0 = time.perf_counter()
@@ -396,6 +442,7 @@ class FastOmniposeRunner:
         self._model = models.CellposeModel(gpu=self.gpu, model_type=self.model_type)
         return time.perf_counter() - t0
 
+    @_with_gpu_session
     def segment_normalized_fp32(self, norm_img: np.ndarray, normalize_inside_net: bool = False) -> tuple[np.ndarray, float, float]:
         """Run FP32 ``bact_phase_omni`` + ``compute_masks`` on a pre-normalized ``[0, 1]`` 2D image."""
         self.load_model()
@@ -445,6 +492,7 @@ class FastOmniposeRunner:
         t_post = time.perf_counter() - t1
         return np.asarray(masks, dtype=np.int32), t_net, t_post
 
+    @_with_gpu_session
     def warmup(self, sample_image: np.ndarray | None = None) -> None:
         """Run one small dummy pass to warm up cuDNN & CUDA kernels."""
         self.load_model()
@@ -457,6 +505,7 @@ class FastOmniposeRunner:
             norm = np.zeros((256, 256), dtype=np.float32)
         _ = self.segment_normalized_fp32(norm)
 
+    @_with_gpu_session
     def run_stack(
         self,
         num_frames: int,
@@ -686,6 +735,9 @@ def _build_cli_parser():
     p.add_argument("--founders-json", default=None, help="Optional JSON mapping {founder_id: [y, x]}")
     p.add_argument("--min-roi-size", type=int, default=160)
     p.add_argument("--context-pad", type=int, default=16)
+    p.add_argument("--no-gpu-lock", action="store_false", dest="use_gpu_lock", help="Skip the shared GPU lock")
+    p.add_argument("--gpu-lock-path", type=Path, help="Path to the shared GPU lock file")
+    p.add_argument("--gpu-lock-timeout-s", type=float, help="Maximum wait for the shared GPU lock in seconds")
     return p
 
 
@@ -709,19 +761,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         p = pos_dir / "img_000000000_YFPDAPImirrEXP_000.tif"
         return tifffile.imread(p) if p.exists() else None
 
-    runner = FastOmniposeRunner(min_roi_size=args.min_roi_size, context_pad=args.context_pad)
-    t_load = runner.load_model()
-    runner.warmup(read_ph(0))
-    t0 = time.perf_counter()
-    results, profiles, wait_s = runner.run_stack(
-        args.num_frames,
-        read_ph,
-        pi_reader=read_pi,
-        yfp0_reader=read_yfp0,
-        founders=founders,
-        save_labels_dir=args.save_labels_dir,
+    runner = FastOmniposeRunner(
+        min_roi_size=args.min_roi_size,
+        context_pad=args.context_pad,
+        use_gpu_lock=args.use_gpu_lock,
+        gpu_lock_path=args.gpu_lock_path,
+        gpu_lock_timeout_s=args.gpu_lock_timeout_s,
     )
-    elapsed_s = time.perf_counter() - t0
+    with runner.gpu_session(f"FastOmnipose {pos_dir}"):
+        t_load = runner.load_model()
+        runner.warmup(read_ph(0))
+        t0 = time.perf_counter()
+        results, profiles, wait_s = runner.run_stack(
+            args.num_frames,
+            read_ph,
+            pi_reader=read_pi,
+            yfp0_reader=read_yfp0,
+            founders=founders,
+            save_labels_dir=args.save_labels_dir,
+        )
+        elapsed_s = time.perf_counter() - t0
     payload = {
         "model_load_s": round(t_load, 3),
         "elapsed_s": round(elapsed_s, 3),
